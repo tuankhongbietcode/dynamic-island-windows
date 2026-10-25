@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Đường dẫn Python cục bộ + log gỡ lỗi
+python-path.txt
+*.log
+
+# Ảnh chụp desktop thật (có thể lộ nội dung máy) - chỉ commit ảnh render sạch
+preview/live*.png
+
+# Hệ điều hành
+Thumbs.db
+desktop.ini
+.DS_Store
