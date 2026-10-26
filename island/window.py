@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
 import math
 import time
 
@@ -54,6 +56,17 @@ SIZES = {
     COMPACT: (250, 42, 21.0),
     EXPANDED: (496, 184, 44.0),
     NOTIF: (440, 100, 34.0),
+}
+
+# Lớp cửa sổ "nền" của Windows: user đang ở desktop/traybar, chưa vào app nào.
+# Khi đó đảo vẫn chớp mắt bình thường; chỉ đứng yên khi một app thật chiếm foreground.
+_DESKTOP_CLASSES = {
+    "Progman",                     # wallpaper Win10
+    "WorkerW",                     # lớp wallpaper Win11
+    "Shell_TrayWnd",               # taskbar
+    "Windows.UI.Core.CoreWindow",  # mặt desktop Win11
+    "NotifyIconOverflowWindow",
+    "Windows.UI.Composition.DesktopWindowContentBridge",
 }
 
 # --- bố cục trạng thái mở rộng ---
@@ -175,8 +188,14 @@ class Island(QWidget):
         self._marq = False
         self._marq_key: str | None = None
         self._marq_t0 = 0.0
+        self._static = bool(config.get("static_mode", False))
+        self._auto_static = bool(config.get("auto_static", True))
+        self._other_fg = False        # cửa sổ ứng dụng khác đang ở foreground?
+        self._geo_hover = False       # chuột có nằm trong vùng đảo (tính hình học)?
+        self._clock_label = time.strftime("%H:%M")
 
         self._hover = False
+        self._evt_hover = False
         self._suppressed = False
         self._hover_ctrl: str | None = None
         self._hits: dict[str, QRectF] = {}
@@ -214,6 +233,13 @@ class Island(QWidget):
         self._ui.timeout.connect(self._tick_ui)
         self._ui.start()
 
+        # Theo dõi cửa sổ foreground + hover hình học: đông cứng khi dùng app khác
+        self._fg_timer = QTimer(self)
+        self._fg_timer.setInterval(400)
+        self._fg_timer.timeout.connect(self._check_foreground)
+        self._fg_timer.start()
+        self._check_foreground()
+
         self._collapse = QTimer(self)
         self._collapse.setSingleShot(True)
         self._collapse.setInterval(280)
@@ -243,7 +269,25 @@ class Island(QWidget):
             "top": self._top,
             "pinned": self._pinned,
             "always_on_top": self._always_top,
+            "static_mode": self._static,
+            "auto_static": self._auto_static,
         }
+
+    def set_static(self, on: bool):
+        """Chế độ tĩnh thủ công: đứng yên hoàn toàn, chỉ vẽ lại khi hover hoặc phút đổi."""
+        self._static = bool(on)
+        if on:
+            self._eyes.blink = 0.0
+            self._marq = False
+        self.update()
+
+    def set_auto_static(self, on: bool):
+        """Tự động đông cứng khi một ứng dụng khác chiếm foreground (đang làm việc)."""
+        self._auto_static = bool(on)
+        if on and self._other_fg:
+            self._eyes.blink = 0.0
+            self._marq = False
+        self.update()
 
     def reset_position(self):
         screen = self.screen().availableGeometry()
@@ -416,23 +460,93 @@ class Island(QWidget):
         self._slide = (1.0 - t) * 7.0
         self.update()
 
+    # --------------------------------------------------- theo dõi foreground
+    def _foreground_class(self) -> str:
+        """Tên lớp của cửa sổ đang ở foreground (vd. ChromeWindowClass)."""
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return ""
+            buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(
+                ctypes.wintypes.HWND(hwnd), buf, 256
+            )
+            return buf.value
+        except Exception:
+            return ""
+
+    def _is_other_app_foreground(self) -> bool:
+        """True khi một ứng dụng THẬT đang chiếm foreground.
+
+        Đảo dùng WindowDoesNotAcceptFocus nên nó không bao giờ là foreground.
+        Vì vậy phải phân biệt: desktop/traybar (user đang nhìn đảo -> vẫn động)
+        với ứng dụng khác (user đang làm việc -> đảo đứng yên cho tiết kiệm).
+        """
+        try:
+            hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+        except Exception:
+            return False
+        if hwnd == int(self.winId()):
+            return False
+        return self._foreground_class() not in _DESKTOP_CLASSES
+
+    def _cursor_global(self):
+        try:
+            pt = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            return pt.x, pt.y
+        except Exception:
+            return -1, -1
+
+    def _check_foreground(self):
+        other = self._is_other_app_foreground()
+        cx, cy = self._cursor_global()
+        geo = self.geometry().contains(cx, cy)
+        changed = other != self._other_fg or geo != self._geo_hover
+        if other and not self._other_fg:
+            # vừa chuyển sang app khác: duỗi thẳng mắt, ngưng chữ chạy
+            self._eyes.blink = 0.0
+            self._marq = False
+        self._other_fg = other
+        self._geo_hover = geo
+        hover = self._evt_hover or geo
+        if hover != self._hover:
+            self._hover = hover
+            changed = True
+        if changed:
+            # chỉ vẽ lại khi trạng thái thật sự đổi, không vẽ vô ích mỗi 400ms
+            self.update()
+
     def _tick_ui(self):
         self._tick_n += 1
         playing = bool(self._media.get("has") and self._media.get("playing"))
-        if playing:
-            self._eq += 0.34
+        prev_blink = self._eyes.blink
+        frozen = (self._static or (self._auto_static and self._other_fg)) and not self._hover
 
-        dx = 0.0
+        if not frozen:
+            if playing:
+                self._eq += 0.34
+            dx = 0.0
+            if self._hover:
+                dx = QCursor.pos().x() - self.mapToGlobal(self.rect().center()).x()
+            self._eyes.tick(playing, self._hover, dx, time.monotonic() - self._idle_since)
+
+        # 30 fps: rê chuột, chữ chạy, hoặc đang chớp mắt (kể cả khung đóng mắt cuối)
         if self._hover:
-            dx = QCursor.pos().x() - self.mapToGlobal(self.rect().center()).x()
-        self._eyes.tick(playing, self._hover, dx, time.monotonic() - self._idle_since)
-
-        # 30fps chỉ khi thật sự cần: chớp mắt, chạy chữ, hoặc sóng nhạc
-        if self._eyes.blink > 0.01 or self._marq or self._hover:
             self.update()
-        elif playing and self._tick_n % 2 == 0:
+            return
+        if not frozen and (self._marq or self._eyes.blink > 0.01 or prev_blink > 0.01):
             self.update()
-        elif self._tick_n % 30 == 0:
+            return
+        # 15 fps: sóng nhạc
+        if playing and not frozen:
+            if self._tick_n % 2 == 0:
+                self.update()
+            return
+        # rảnh: chỉ vẽ lại khi phút đổi — gần như 0% CPU
+        label = time.strftime("%H:%M")
+        if label != self._clock_label:
+            self._clock_label = label
             self.update()
 
     # ------------------------------------------------------------------ vẽ
@@ -986,6 +1100,7 @@ class Island(QWidget):
 
     # -------------------------------------------------------------- tương tác
     def enterEvent(self, _event):
+        self._evt_hover = True
         self._hover = True
         self._suppressed = False
         self._collapse.stop()
@@ -996,7 +1111,8 @@ class Island(QWidget):
         self.refresh()
 
     def leaveEvent(self, _event):
-        self._hover = False
+        self._evt_hover = False
+        self._hover = self._geo_hover
         self._suppressed = False
         self._hover_ctrl = None
         if not self._pinned:

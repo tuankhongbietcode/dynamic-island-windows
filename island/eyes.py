@@ -35,7 +35,7 @@ class Eyes:
                 random.uniform(2.4, 6.2) if random.random() > 0.22 else 0.22
             )
 
-        phase = (now - self._blink_at) / 0.15
+        phase = (now - self._blink_at) / 0.19
         self.blink = math.sin(phase * math.pi) ** 0.65 if 0.0 <= phase <= 1.0 else 0.0
 
         self.happy += ((1.0 if playing else 0.0) - self.happy) * 0.14
@@ -61,15 +61,17 @@ class Eyes:
         cy = area.center().y()
         shift = self.look * eye_w * 0.40
 
-        open_h = h * (1.0 - 0.90 * self.blink) * (1.0 - 0.80 * self.sleep)
+        open_h = max(1.2, h * (1.0 - 0.90 * self.blink) * (1.0 - 0.80 * self.sleep))
         stroke = max(1.3, h * 0.17)
+        # mí mắt khép lại: mắt cười ^^ cũng phải dẹt xuống mới thấy chớp
+        squash = (1.0 - 0.92 * self.blink) * (1.0 - 0.78 * self.sleep)
 
         for sign in (-1.0, 1.0):
             cx = area.center().x() + sign * offset + shift
 
             if happy < 0.985:
                 a = int(color.alpha() * (1.0 - happy))
-                if a > 4 and open_h > 1.2:
+                if a > 4:
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(alpha(color, a))
                     p.drawRoundedRect(
@@ -83,11 +85,12 @@ class Eyes:
                 if a > 4:
                     half = eye_w * 0.50
                     base = cy + h * 0.16
+                    peak = h * 0.86 * squash
                     path = QPainterPath()
                     path.moveTo(QPointF(cx - half, base))
                     path.cubicTo(
-                        QPointF(cx - half * 0.62, base - h * 0.86),
-                        QPointF(cx + half * 0.62, base - h * 0.86),
+                        QPointF(cx - half * 0.62, base - peak),
+                        QPointF(cx + half * 0.62, base - peak),
                         QPointF(cx + half, base),
                     )
                     p.setBrush(Qt.BrushStyle.NoBrush)

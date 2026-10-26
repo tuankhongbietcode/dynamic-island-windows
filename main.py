@@ -147,6 +147,16 @@ def main() -> int:
     act_top.setChecked(cfg.get("always_on_top", True))
     act_top.toggled.connect(island.set_always_on_top)
 
+    act_static = QAction("Chế độ tĩnh", menu)
+    act_static.setCheckable(True)
+    act_static.setChecked(cfg.get("static_mode", False))
+    act_static.toggled.connect(island.set_static)
+
+    act_autostatic = QAction("Tự động tĩnh khi dùng app khác", menu)
+    act_autostatic.setCheckable(True)
+    act_autostatic.setChecked(cfg.get("auto_static", True))
+    act_autostatic.toggled.connect(island.set_auto_static)
+
     act_startup = QAction("Khởi động cùng Windows", menu)
     act_startup.setCheckable(True)
     act_startup.setChecked(os.path.exists(startup_file()))
@@ -172,6 +182,8 @@ def main() -> int:
 
     menu.addAction(act_expand)
     menu.addAction(act_top)
+    menu.addAction(act_static)
+    menu.addAction(act_autostatic)
     menu.addAction(act_startup)
     menu.addSeparator()
     menu.addAction(act_reset)

@@ -106,19 +106,20 @@ def main():
 
     shots = []
 
-    def shot(name, state, happy=0.0, sleep=0.0):
+    def shot(name, state, happy=0.0, sleep=0.0, blink=0.0):
         island._set_state(state, animate=False)
         island._content = 1.0
         island._slide = 0.0
         island._eyes.happy = happy
         island._eyes.sleep = sleep
-        island._eyes.blink = 0.0
+        island._eyes.blink = blink
         island._marq_key = None
         island.update()
         settle()
         shots.append((name, island.grab()))
 
-    shot(IDLE, IDLE, sleep=0.0)
+    shot(IDLE, IDLE, sleep=0.0, blink=0.0)
+    shot("idle_blink", IDLE, sleep=0.0, blink=0.95)   # khung đang chớp mắt
     shot(COMPACT, COMPACT, happy=1.0)
     shot(EXPANDED, EXPANDED, happy=1.0)
 

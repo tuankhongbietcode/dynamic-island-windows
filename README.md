@@ -44,15 +44,13 @@ Nếu bạn đã có sẵn một môi trường Python khác và không muốn t
 
 Muốn tự khởi động cùng Windows: chuột phải lên island → **Khởi động cùng Windows** (hoặc bật trong menu tray).
 
-## Dùng
-
 | Thao tác | Kết quả |
 |---|---|
 | Đưa chuột lên island | Bung ra: nhạc + thông số CPU/RAM/NET/PIN |
 | Bấm chuột trái | Ghim mở rộng (bấm lần nữa để thu lại) |
 | Kéo chuột | Di chuyển island, tự bám lại mép trên |
 | Chuột phải | Menu: ghim, về giữa màn hình, gửi thông báo thử, thoát |
-| Icon ở khay hệ thống | Menu đầy đủ + bật/tắt luôn trên cùng |
+| Icon ở khay hệ thống | Menu đầy đủ: luôn trên cùng, chế độ tĩnh, tự động tĩnh, khởi động cùng Windows |
 
 Khi thu nhỏ:
 
@@ -61,6 +59,14 @@ Khi thu nhỏ:
 
 Khi có thông báo Windows → island tự bung thành thẻ thông báo 6 giây rồi thu lại.
 Nếu đang mở rộng thì chỉ hiện chấm đỏ ở góc, không cắt ngang việc bạn đang làm.
+
+## Chế độ tĩnh & Tối ưu CPU
+
+Đảo tự động **đông cứng** khi bạn chuyển sang làm việc ở ứng dụng khác — mắt ngừng chớp, sóng nhạc dừng, chỉ còn đồng hồ và hình dáng viên đảo. Điều này giúp CPU gần như không tốn tài nguyên khi bạn tập trung vào việc chính.
+
+- **Tự động tĩnh khi dùng app khác** (mặc định BẬT): đảo phát hiện khi một cửa sổ ứng dụng thật chiếm foreground → tự động đứng yên. Quay lại desktop hoặc rê chuột lên đảo → hoạt cảnh tiếp tục.
+- **Chế độ tĩnh thủ công** (mặc định TẮT): bật trong khay hệ thống để đảo luôn đứng yên, chỉ vẽ lại khi phút đổi hoặc bạn rê chuột vào.
+- Nhịp vẽ tự thích ứng: 30 fps khi đang chớp mắt / chạy chữ / rê chuột, 15 fps khi chỉ có sóng nhạc, ~1 fps khi rảnh hoặc đông cứng.
 
 ## Thông báo Teams / Outlook / mail
 
@@ -107,6 +113,9 @@ Xoá file này để về mặc định.
   khung hình chỉ blit lại, nên lúc phát nhạc CPU ~1–2% (một nhân).
 - Nhịp vẽ tự thích ứng: 30 fps khi đang chớp mắt / chạy chữ / rê chuột, 15 fps khi chỉ có sóng
   nhạc, 1 fps khi rảnh.
+- **Chế độ tĩnh / tối ưu foreground**: theo dõi cửa sổ đang chiếm foreground qua `GetClassNameW`
+  (mỗi 400 ms). Nếu là ứng dụng thật (không phải desktop/traybar) → đông cứng, chỉ vẽ lại khi
+  phút đổi hoặc rê chuột vào. Giúp CPU gần như 0% khi đang làm việc ở app khác.
 - `media.py` và `notify.py` chạy trong `QThread` riêng, mỗi thread có asyncio loop cho WinRT;
   giao tiếp với UI qua `Signal`.
 - Chạy `python main.py` để xem log; `python snapshot.py` để xuất ảnh từng trạng thái vào `preview/`.
