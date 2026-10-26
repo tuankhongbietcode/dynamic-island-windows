@@ -18,6 +18,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QFont,
     QFontMetricsF,
     QImage,
@@ -38,8 +39,9 @@ from PySide6.QtWidgets import (
 
 from . import icons
 from .debug import dbg
+from .eyes import Eyes
 from .monitor import fmt_rate
-from .theme import C, PAD, alpha, clamp, f, lerp, mix
+from .theme import C, PAD, alpha, clamp, f, lerp, mix, rgba
 
 IDLE = "idle"
 COMPACT = "compact"
@@ -48,11 +50,21 @@ NOTIF = "notif"
 
 # (rộng, cao, bán kính góc)
 SIZES = {
-    IDLE: (178, 38, 19.0),
-    COMPACT: (240, 38, 19.0),
-    EXPANDED: (500, 194, 46.0),
-    NOTIF: (500, 108, 40.0),
+    IDLE: (196, 42, 21.0),
+    COMPACT: (250, 42, 21.0),
+    EXPANDED: (496, 184, 44.0),
+    NOTIF: (440, 100, 34.0),
 }
+
+# --- bố cục trạng thái mở rộng ---
+EXP_ART = 92.0
+EXP_ART_X = 24.0
+EXP_ART_Y = 30.0
+EXP_TEXT_X = EXP_ART_X + EXP_ART + 18.0
+EXP_TEXT_W = 196.0
+EXP_DIV_X = 344.0
+EXP_STAT_X = 360.0
+EXP_STAT_W = 112.0
 
 
 def _elide(text: str, font: QFont, width: float) -> str:
@@ -83,6 +95,22 @@ _BRANDS = (
     ("edge", QColor(0x0F, 0x7B, 0xD8)),
     ("visual studio", QColor(0x00, 0x7A, 0xCC)),
     ("store", QColor(0x00, 0x78, 0xD4)),
+)
+
+# tên gọn của app phát nhạc
+_APP_NAMES = (
+    ("spotify", "Spotify"),
+    ("msedge", "Edge"),
+    ("edge", "Edge"),
+    ("chrome", "Chrome"),
+    ("firefox", "Firefox"),
+    ("zune", "Media Player"),
+    ("itunes", "iTunes"),
+    ("apple", "Apple Music"),
+    ("tidal", "TIDAL"),
+    ("deezer", "Deezer"),
+    ("vlc", "VLC"),
+    ("foobar", "foobar2000"),
 )
 
 
@@ -120,6 +148,7 @@ class Island(QWidget):
         self._radius = r
         self._state = IDLE
         self._content = 1.0
+        self._slide = 0.0
 
         screen = self.screen().availableGeometry()
         self._cx = float(config.get("cx") or screen.center().x())
@@ -141,6 +170,12 @@ class Island(QWidget):
         self._pos_base = 0.0
         self._pos_at = 0.0
 
+        self._eyes = Eyes()
+        self._idle_since = time.monotonic()
+        self._marq = False
+        self._marq_key: str | None = None
+        self._marq_t0 = 0.0
+
         self._hover = False
         self._suppressed = False
         self._hover_ctrl: str | None = None
@@ -155,24 +190,27 @@ class Island(QWidget):
 
         self._sh_key = None
         self._sh_px = QPixmap()
+        self._chrome_key = None
+        self._chrome_px = QPixmap()
 
         self._m_from = (w, h, r)
         self._m_to = (w, h, r)
         self._morph = QVariantAnimation(self)
         self._morph.setStartValue(0.0)
         self._morph.setEndValue(1.0)
-        self._morph.setDuration(300)
-        self._morph.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._morph.setDuration(360)
+        self._morph.setEasingCurve(QEasingCurve.Type.OutExpo)
         self._morph.valueChanged.connect(self._on_morph)
 
         self._fade = QVariantAnimation(self)
         self._fade.setStartValue(0.0)
         self._fade.setEndValue(1.0)
-        self._fade.setDuration(210)
+        self._fade.setDuration(260)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._fade.valueChanged.connect(self._on_fade)
 
         self._ui = QTimer(self)
-        self._ui.setInterval(60)
+        self._ui.setInterval(33)
         self._ui.timeout.connect(self._tick_ui)
         self._ui.start()
 
@@ -230,6 +268,7 @@ class Island(QWidget):
         if payload.get("has"):
             self._pos_base = payload.get("position", 0.0)
             self._pos_at = time.monotonic()
+            self._idle_since = time.monotonic()
             art = payload.get("art") or b""
             if art and art != getattr(self, "_art_bytes", b""):
                 self._art_bytes = art
@@ -241,10 +280,20 @@ class Island(QWidget):
                     )
                     self._art_px = QPixmap.fromImage(img)
                     self._art_big = QPixmap.fromImage(
-                        img.scaled(192, 192, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                        img.scaled(
+                            192,
+                            192,
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
                     )
                     self._art_small = QPixmap.fromImage(
-                        img.scaled(52, 52, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                        img.scaled(
+                            60,
+                            60,
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
                     )
                     self._accent = self._accent_from(img)
         else:
@@ -259,7 +308,12 @@ class Island(QWidget):
 
     @staticmethod
     def _accent_from(img: QImage) -> QColor:
-        small = img.scaled(18, 18, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        small = img.scaled(
+            18,
+            18,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         best = None
         best_score = -1.0
         for y in range(small.height()):
@@ -285,6 +339,7 @@ class Island(QWidget):
             self.update()
 
     def push_notification(self, payload: dict):
+        dbg("notif push", payload.get("app"), "state", self._state)
         if self._state == EXPANDED:
             self._badge = True
             self.update()
@@ -298,6 +353,7 @@ class Island(QWidget):
 
     def _check_notif(self):
         if self._notif is not None and not self._notif_active():
+            dbg("notif expired")
             self._notif = None
             self.refresh()
 
@@ -317,6 +373,7 @@ class Island(QWidget):
         self._set_state(self._desired_state())
 
     def _set_state(self, state: str, animate: bool = True):
+        dbg("state", self._state, "->", state, "hover", self._hover, "pin", self._pinned)
         if state == self._state:
             return
         w0, h0 = self._size.width(), self._size.height()
@@ -329,11 +386,13 @@ class Island(QWidget):
         self._fade.stop()
         self._fade.setStartValue(0.0)
         self._fade.setEndValue(1.0)
-        self._fade.setDuration(210)
+        self._fade.setDuration(240 if state != IDLE else 180)
         self._fade.start()
         if not animate:
             self._size = QSizeF(w1, h1)
             self._radius = r1
+            self._content = 1.0
+            self._slide = 0.0
             self._reposition()
             self.update()
             return
@@ -352,19 +411,99 @@ class Island(QWidget):
         self.update()
 
     def _on_fade(self, value):
-        self._content = float(value)
+        t = float(value)
+        self._content = t
+        self._slide = (1.0 - t) * 7.0
         self.update()
 
     def _tick_ui(self):
         self._tick_n += 1
-        playing = self._media.get("has") and self._media.get("playing")
-        if playing and self._state in (COMPACT, EXPANDED):
-            self._eq += 0.32
+        playing = bool(self._media.get("has") and self._media.get("playing"))
+        if playing:
+            self._eq += 0.34
+
+        dx = 0.0
+        if self._hover:
+            dx = QCursor.pos().x() - self.mapToGlobal(self.rect().center()).x()
+        self._eyes.tick(playing, self._hover, dx, time.monotonic() - self._idle_since)
+
+        # 30fps chỉ khi thật sự cần: chớp mắt, chạy chữ, hoặc sóng nhạc
+        if self._eyes.blink > 0.01 or self._marq or self._hover:
             self.update()
-        elif self._tick_n % 17 == 0:
+        elif playing and self._tick_n % 2 == 0:
+            self.update()
+        elif self._tick_n % 30 == 0:
             self.update()
 
     # ------------------------------------------------------------------ vẽ
+    def _chrome(self) -> QPixmap:
+        """Nền + bóng đổ, cache lại theo kích thước và màu nhấn."""
+        pill = self._pill_rect()
+        key = (
+            round(pill.width()),
+            round(pill.height()),
+            round(self._radius * 2),
+            self._accent.rgb(),
+            bool(self._media.get("has")),
+            self._state in (EXPANDED, NOTIF),
+        )
+        if key == self._chrome_key:
+            return self._chrome_px
+
+        dpr = self.devicePixelRatioF() or 1.0
+        w, h = self.width(), self.height()
+        pm = QPixmap(max(1, round(w * dpr)), max(1, round(h * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        cp = QPainter(pm)
+        cp.setRenderHints(
+            QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+        )
+        cp.drawPixmap(0, 0, self._shadow(pill.width(), pill.height(), self._radius))
+
+        path = QPainterPath()
+        path.addRoundedRect(pill, self._radius, self._radius)
+        grad = QLinearGradient(0, pill.top(), 0, pill.bottom())
+        grad.setColorAt(0.0, C.bg_top)
+        grad.setColorAt(0.45, C.bg_mid)
+        grad.setColorAt(1.0, C.bg_bottom)
+        cp.fillPath(path, QBrush(grad))
+
+        cp.save()
+        cp.setClipPath(path)
+        big = self._state in (EXPANDED, NOTIF)
+        if self._media.get("has"):
+            glow = QRadialGradient(
+                QPointF(pill.left() + (76 if big else 42), pill.center().y()),
+                180 if big else 110,
+            )
+            glow.setColorAt(0.0, alpha(self._accent, 19 if big else 13))
+            glow.setColorAt(0.55, alpha(self._accent, 5 if big else 3))
+            glow.setColorAt(1.0, alpha(self._accent, 0))
+            cp.fillRect(pill, glow)
+
+        hl_h = min(58.0, pill.height() * 0.62)
+        hl = QLinearGradient(0, pill.top(), 0, pill.top() + hl_h)
+        hl.setColorAt(0.0, QColor(255, 255, 255, 18))
+        hl.setColorAt(1.0, QColor(255, 255, 255, 0))
+        cp.fillRect(QRectF(pill.left(), pill.top(), pill.width(), hl_h), hl)
+        cp.restore()
+
+        rim = QLinearGradient(0, pill.top(), 0, pill.bottom())
+        rim.setColorAt(0.0, rgba(255, 255, 255, 62))
+        rim.setColorAt(0.30, rgba(255, 255, 255, 18))
+        rim.setColorAt(0.70, rgba(255, 255, 255, 13))
+        rim.setColorAt(1.0, rgba(255, 255, 255, 30))
+        cp.setBrush(Qt.BrushStyle.NoBrush)
+        cp.setPen(QPen(QBrush(rim), 1.0))
+        cp.drawPath(path)
+        cp.end()
+
+        self._chrome_key = key
+        self._chrome_px = pm
+        return pm
+
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHints(
@@ -373,41 +512,17 @@ class Island(QWidget):
             | QPainter.RenderHint.SmoothPixmapTransform
         )
         pill = self._pill_rect()
-        p.drawPixmap(0, 0, self._shadow(pill.width(), pill.height(), self._radius))
+        p.drawPixmap(QPointF(0.0, 0.0), self._chrome())
 
         path = QPainterPath()
         path.addRoundedRect(pill, self._radius, self._radius)
 
-        grad = QLinearGradient(0, pill.top(), 0, pill.bottom())
-        grad.setColorAt(0.0, C.bg_top)
-        grad.setColorAt(1.0, C.bg_bottom)
-        p.fillPath(path, QBrush(grad))
-
         p.save()
         p.setClipPath(path)
-        hl_h = min(72.0, pill.height() * 0.75)
-        hl = QLinearGradient(0, pill.top(), 0, pill.top() + hl_h)
-        hl.setColorAt(0.0, QColor(255, 255, 255, 26))
-        hl.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.fillRect(QRectF(pill.left(), pill.top(), pill.width(), hl_h), hl)
-
-        if self._media.get("has"):
-            glow = QRadialGradient(
-                QPointF(pill.left() + 70, pill.top() + 70),
-                190 if self._state == EXPANDED else 90,
-            )
-            glow.setColorAt(0.0, alpha(self._accent, 42 if self._state == EXPANDED else 24))
-            glow.setColorAt(1.0, alpha(self._accent, 0))
-            p.fillRect(pill, glow)
-        p.restore()
-
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(C.stroke, 1.0))
-        p.drawPath(path)
-
-        p.save()
-        p.setClipPath(path)
-        p.setOpacity(max(0.0, min(1.0, self._content)))
+        p.setOpacity(clamp(self._content, 0.0, 1.0))
+        p.translate(0.0, self._slide)
+        if self._state != EXPANDED:
+            self._marq = False
         if self._state == IDLE:
             self._paint_idle(p, pill)
         elif self._state == COMPACT:
@@ -419,13 +534,15 @@ class Island(QWidget):
         p.restore()
 
         if self._badge:
-            cx, cy = pill.right() - 12, pill.top() + 12
+            cx, cy = pill.right() - 13, pill.top() + 13
             p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(alpha(C.red, 70))
+            p.drawEllipse(QPointF(cx, cy), 5.5, 5.5)
             p.setBrush(C.red)
-            p.drawEllipse(QPointF(cx, cy), 3.2, 3.2)
+            p.drawEllipse(QPointF(cx, cy), 3.0, 3.0)
 
     def _shadow(self, w: float, h: float, r: float) -> QPixmap:
-        key = (round(w / 3), round(h / 3), round(r / 3))
+        key = (round(w / 4), round(h / 4), round(r / 4))
         if key == self._sh_key:
             return self._sh_px
         pw, ph = round(w + 2 * PAD), round(h + 2 * PAD)
@@ -434,15 +551,17 @@ class Island(QWidget):
         sp = QPainter(src)
         sp.setRenderHint(QPainter.RenderHint.Antialiasing)
         sp.setPen(Qt.PenStyle.NoPen)
-        sp.setBrush(QColor(0, 0, 0, 165))
-        sp.drawRoundedRect(QRectF(PAD, PAD + 5, w, h), r, r)
+        sp.setBrush(QColor(0, 0, 0, 120))
+        sp.drawRoundedRect(QRectF(PAD - 2, PAD + 8, w + 4, h + 4), r + 2, r + 2)
+        sp.setBrush(QColor(0, 0, 0, 140))
+        sp.drawRoundedRect(QRectF(PAD, PAD + 3, w, h), r, r)
         sp.end()
 
         scene = QGraphicsScene()
         scene.setSceneRect(0, 0, pw, ph)
         item = QGraphicsPixmapItem(src)
         blur = QGraphicsBlurEffect()
-        blur.setBlurRadius(15)
+        blur.setBlurRadius(17)
         item.setGraphicsEffect(blur)
         scene.addItem(item)
 
@@ -457,58 +576,73 @@ class Island(QWidget):
         return out
 
     # ------------------------------------------------------------- nội dung
-    def _paint_idle(self, p: QPainter, r: QRectF):
-        font = f(13, QFont.Weight.DemiBold, 0.4)
-        p.setFont(font)
-        p.setPen(C.text)
-        p.drawText(QRectF(r.left() + 26, r.top(), r.width() - 52, r.height()), CC, time.strftime("%H:%M"))
+    def _eye_color(self) -> QColor:
+        return C.eye(self._accent)
 
-        cx, cy = r.left() + 15.0, r.center().y()
-        if self._media.get("has"):
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(self._accent)
-            p.drawEllipse(QPointF(cx, cy), 3.0, 3.0)
-        else:
-            icons.note(p, QRectF(cx - 5, cy - 5, 10, 10), C.faint)
+    def _paint_idle(self, p: QPainter, r: QRectF):
+        clock = time.strftime("%H:%M")
+        date = _vn_short()
+        clock_font = f(13.5, QFont.Weight.DemiBold, 0.2)
+        date_font = f(8.5, QFont.Weight.Medium, 0.35)
+        fm_c = QFontMetricsF(clock_font)
+        fm_d = QFontMetricsF(date_font)
+        block_w = max(fm_c.horizontalAdvance("00:00"), fm_d.horizontalAdvance(date))
+        eye_w, gap = 20.0, 11.0
+        total = eye_w + gap + block_w
+        x0 = r.center().x() - total / 2.0
+
+        self._eyes.paint(
+            p, QRectF(x0, r.center().y() - 5.0, eye_w, 10.0), self._eye_color()
+        )
+
+        bx = x0 + eye_w + gap
+        y0 = r.center().y() - 15.0
+        p.setFont(clock_font)
+        p.setPen(C.text)
+        p.drawText(QRectF(bx, y0, block_w + 2, 19), LC, clock)
+        p.setFont(date_font)
+        p.setPen(C.mute)
+        p.drawText(QRectF(bx, y0 + 19, block_w + 2, 14), LC, date)
 
     def _paint_compact(self, p: QPainter, r: QRectF):
-        art = QRectF(r.left() + 7, r.top() + 7, 24, 24)
-        self._paint_art(p, art, 8, small=True)
+        art = QRectF(r.left() + 7, r.top() + 7, 28, 28)
+        self._paint_art(p, art, 9.5, small=True)
 
-        x = art.right() + 10
-        playing = self._media.get("playing")
-        if playing:
-            self._paint_eq(p, QRectF(x, r.center().y() - 7, 15, 14))
+        cy = r.center().y()
+        x = art.right() + 9
+        if self._media.get("playing"):
+            self._paint_eq(p, QRectF(x, cy - 6.5, 14, 13))
         else:
-            icons.pause(p, QRectF(x, r.center().y() - 5, 10, 10), C.mute)
-        x += 21
+            icons.pause(p, QRectF(x + 2, cy - 5, 9, 10), C.mute)
+        x += 20
 
+        eye_w = 24.0
         tf = f(11.5, QFont.Weight.DemiBold)
+        avail = r.right() - 13 - eye_w - 10 - x
         p.setFont(tf)
         p.setPen(C.text)
-        time_w = 40.0
-        avail = r.right() - 12 - time_w - x
-        title = _elide(self._media.get("title", ""), tf, avail)
-        p.drawText(QRectF(x, r.top(), avail, r.height()), LC, title)
-
-        p.setFont(f(10, QFont.Weight.Medium))
-        p.setPen(C.mute)
         p.drawText(
-            QRectF(r.right() - 12 - time_w, r.top(), time_w, r.height()),
-            RC,
-            time.strftime("%H:%M"),
+            QRectF(x, r.top(), avail, r.height()),
+            LC,
+            _elide(self._media.get("title", ""), tf, avail),
+        )
+
+        self._eyes.paint(
+            p,
+            QRectF(r.right() - 13 - eye_w, cy - 5.5, eye_w, 11.0),
+            self._eye_color(),
         )
 
     def _paint_eq(self, p: QPainter, r: QRectF):
         p.setPen(Qt.PenStyle.NoPen)
-        bar_w, gap = 3.0, 3.4
-        for i in range(3):
-            amp = 0.32 + 0.68 * (0.5 + 0.5 * math.sin(self._eq + i * 1.85))
-            hgt = max(2.5, r.height() * amp)
-            x = r.left() + i * (bar_w + gap)
-            y = r.center().y() - hgt / 2
-            p.setBrush(alpha(self._accent, 235 if i == 1 else 165))
-            p.drawRoundedRect(QRectF(x, y, bar_w, hgt), 1.5, 1.5)
+        n, bw, gap = 4, 2.4, 2.3
+        for i in range(n):
+            amp = 0.30 + 0.70 * (0.5 + 0.5 * math.sin(self._eq + i * 1.55))
+            hgt = max(2.2, r.height() * amp)
+            x = r.left() + i * (bw + gap)
+            y = r.center().y() - hgt / 2.0
+            p.setBrush(alpha(self._accent, 130 + i * 34))
+            p.drawRoundedRect(QRectF(x, y, bw, hgt), bw / 2, bw / 2)
 
     def _paint_art(self, p: QPainter, rect: QRectF, radius: float, small: bool = False):
         path = QPainterPath()
@@ -520,130 +654,217 @@ class Island(QWidget):
             p.drawPixmap(rect, px, QRectF(px.rect()))
         else:
             g = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            g.setColorAt(0.0, mix(C.bg_bottom, self._accent, 0.60))
-            g.setColorAt(1.0, mix(C.bg_top, self._accent, 0.25))
+            g.setColorAt(0.0, mix(QColor(22, 22, 28), self._accent, 0.55))
+            g.setColorAt(1.0, mix(QColor(6, 6, 9), self._accent, 0.22))
             p.fillRect(rect, g)
-            inset = rect.adjusted(rect.width() * 0.26, rect.height() * 0.26, -rect.width() * 0.26, -rect.height() * 0.26)
-            icons.note(p, inset, alpha(QColor(255, 255, 255), 210))
+            inset = rect.adjusted(
+                rect.width() * 0.28,
+                rect.height() * 0.28,
+                -rect.width() * 0.28,
+                -rect.height() * 0.28,
+            )
+            icons.note(p, inset, alpha(QColor(255, 255, 255), 205))
+
+        sheen = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 16))
+        sheen.setColorAt(0.34, QColor(255, 255, 255, 0))
+        p.fillRect(rect, sheen)
         p.restore()
+
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(alpha(QColor(255, 255, 255), 30), 1.0))
+        p.setPen(QPen(alpha(QColor(255, 255, 255), 38), 1.0))
         p.drawPath(path)
 
     def _paint_expanded(self, p: QPainter, r: QRectF):
         has = self._media.get("has")
-        art = QRectF(r.left() + 22, r.top() + 22, 96, 96)
-        if has:
-            self._paint_art(p, art, 24)
-
-        dx = r.left() + 352
-        dg = QLinearGradient(0, r.top() + 22, 0, r.bottom() - 22)
-        dg.setColorAt(0.0, alpha(QColor(255, 255, 255), 0))
-        dg.setColorAt(0.5, alpha(QColor(255, 255, 255), 34))
-        dg.setColorAt(1.0, alpha(QColor(255, 255, 255), 0))
-        p.setPen(QPen(QBrush(dg), 1.0))
-        p.drawLine(QPointF(dx, r.top() + 22), QPointF(dx, r.bottom() - 22))
 
         if has:
-            self._paint_media(p, r, art.right() + 16, 200)
+            self._eyes.paint(
+                p,
+                QRectF(r.center().x() - 13, r.top() + 10, 26.0, 12.0),
+                self._eye_color(),
+            )
+            art = QRectF(r.left() + EXP_ART_X, r.top() + EXP_ART_Y, EXP_ART, EXP_ART)
+            self._paint_art(p, art, 20)
+            self._paint_media(p, r, r.left() + EXP_TEXT_X, EXP_TEXT_W)
         else:
             self._paint_clock(p, r)
 
-        self._paint_stats(p, r, dx + 16, 112)
+        dx = r.left() + EXP_DIV_X
+        dg = QLinearGradient(0, r.top() + 26, 0, r.bottom() - 26)
+        dg.setColorAt(0.0, alpha(QColor(255, 255, 255), 0))
+        dg.setColorAt(0.5, alpha(QColor(255, 255, 255), 28))
+        dg.setColorAt(1.0, alpha(QColor(255, 255, 255), 0))
+        p.setPen(QPen(QBrush(dg), 1.0))
+        p.drawLine(QPointF(dx, r.top() + 26), QPointF(dx, r.bottom() - 26))
+
+        self._paint_stats(p, r, r.left() + EXP_STAT_X, EXP_STAT_W)
+
+    def _marquee(
+        self,
+        p: QPainter,
+        rect: QRectF,
+        text: str,
+        font: QFont,
+        color: QColor,
+        speed: float = 24.0,
+        gap: float = 34.0,
+    ):
+        fm = QFontMetricsF(font)
+        p.setFont(font)
+        p.setPen(color)
+        if not text:
+            self._marq = False
+            return
+        if fm.horizontalAdvance(text) <= rect.width():
+            self._marq = False
+            p.drawText(rect, LC, text)
+            return
+
+        self._marq = True
+        now = time.monotonic()
+        if text != self._marq_key:
+            self._marq_key = text
+            self._marq_t0 = now
+        span = fm.horizontalAdvance(text) + gap
+        elapsed = max(0.0, now - self._marq_t0 - 1.4)
+        off = (elapsed * speed) % span
+        base = rect.top() + (rect.height() + fm.ascent() - fm.descent()) / 2.0
+
+        p.save()
+        p.setClipRect(rect)
+        p.drawText(QPointF(rect.left() - off, base), text)
+        p.drawText(QPointF(rect.left() - off + span, base), text)
+        p.restore()
+
+        fade = 26.0
+        right = QLinearGradient(rect.right() - fade, 0, rect.right(), 0)
+        right.setColorAt(0.0, QColor(2, 2, 3, 0))
+        right.setColorAt(1.0, QColor(2, 2, 3, 240))
+        p.fillRect(QRectF(rect.right() - fade, rect.top(), fade, rect.height()), right)
+
+    def _app_label(self) -> str:
+        raw = (self._media.get("app") or "").lower()
+        if not raw:
+            return ""
+        for key, name in _APP_NAMES:
+            if key in raw:
+                return name
+        head = raw.split(".")[0].split("_")[0]
+        return head.capitalize() if head else ""
 
     def _paint_media(self, p: QPainter, r: QRectF, x: float, w: float):
         top = r.top()
-        title_font = f(15, QFont.Weight.DemiBold)
-        p.setFont(title_font)
-        p.setPen(C.text)
-        p.drawText(
-            QRectF(x, top + 22, w, 22),
-            LC,
-            _elide(self._media.get("title", ""), title_font, w),
+        self._marquee(
+            p,
+            QRectF(x, top + 32, w, 22),
+            self._media.get("title", ""),
+            f(16.5, QFont.Weight.DemiBold, -0.1),
+            C.text,
         )
 
-        artist_font = f(12, QFont.Weight.Normal)
-        p.setFont(artist_font)
+        app = self._app_label()
+        artist = self._media.get("artist") or ""
+        if app and artist:
+            line = f"{app}  ·  {artist}"
+        else:
+            line = artist or app or "Không rõ nghệ sĩ"
+        af = f(11.5, QFont.Weight.Normal)
+        p.setFont(af)
         p.setPen(C.dim)
-        artist = self._media.get("artist") or "Không rõ nghệ sĩ"
-        p.drawText(
-            QRectF(x, top + 44, w, 18),
-            LC,
-            _elide(artist, artist_font, w),
-        )
+        p.drawText(QRectF(x, top + 56, w, 16), LC, _elide(line, af, w))
 
         pos = self._current_position()
         dur = self._media.get("duration") or 0.0
         frac = clamp(pos / dur, 0.0, 1.0) if dur > 0 else 0.0
 
-        track_y = top + 76
+        track_y = top + 88
+        th = 3.5
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C.track)
-        p.drawRoundedRect(QRectF(x, track_y, w, 4), 2, 2)
-        if frac > 0:
-            p.setBrush(self._accent)
-            p.drawRoundedRect(QRectF(x, track_y, max(4.0, w * frac), 4), 2, 2)
+        p.drawRoundedRect(QRectF(x, track_y, w, th), th / 2, th / 2)
+        if frac > 0.004:
+            fill_w = max(th, w * frac)
+            fg = QLinearGradient(x, 0, x + fill_w, 0)
+            fg.setColorAt(0.0, alpha(self._accent, 190))
+            fg.setColorAt(1.0, mix(self._accent, QColor(255, 255, 255), 0.30))
+            p.setBrush(QBrush(fg))
+            p.drawRoundedRect(QRectF(x, track_y, fill_w, th), th / 2, th / 2)
+
         knob_x = x + w * frac
-        p.setBrush(alpha(QColor(255, 255, 255), 235))
-        p.drawEllipse(QPointF(knob_x, track_y + 2), 3.4, 3.4)
+        p.setBrush(alpha(self._accent, 70))
+        p.drawEllipse(QPointF(knob_x, track_y + th / 2), 5.4, 5.4)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawEllipse(QPointF(knob_x, track_y + th / 2), 2.8, 2.8)
 
-        p.setFont(f(9.5, QFont.Weight.Medium))
+        p.setFont(f(9.5, QFont.Weight.Medium, 0.2))
         p.setPen(C.mute)
-        p.drawText(QRectF(x, top + 84, 60, 14), LC, _mmss(pos))
-        p.drawText(
-            QRectF(x + w - 60, top + 84, 60, 14),
-            RC,
-            _mmss(dur),
-        )
+        p.drawText(QRectF(x, top + 96, 60, 13), LC, _mmss(pos))
+        p.drawText(QRectF(x + w - 60, top + 96, 60, 13), RC, _mmss(dur))
 
-        cx = x + w / 2
-        cy = top + 134
+        cx = x + w / 2.0
+        cy = top + 134.0
         self._hits = {
-            "prev": QRectF(cx - 76, cy - 17, 34, 34),
-            "play": QRectF(cx - 21, cy - 21, 42, 42),
-            "next": QRectF(cx + 42, cy - 17, 34, 34),
+            "prev": QRectF(cx - 78, cy - 17, 34, 34),
+            "play": QRectF(cx - 22, cy - 22, 44, 44),
+            "next": QRectF(cx + 44, cy - 17, 34, 34),
         }
 
+        playing = bool(self._media.get("playing"))
+        hot_play = self._hover_ctrl == "play"
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(alpha(QColor(255, 255, 255), 30 if self._hover_ctrl == "play" else 18))
+        p.setBrush(alpha(QColor(255, 255, 255), 26 if hot_play else 13))
+        p.drawEllipse(QPointF(cx, cy), 21, 21)
+        p.setBrush(alpha(self._accent, 34 if hot_play else 18))
         p.drawEllipse(QPointF(cx, cy), 21, 21)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(alpha(self._accent, 110 if self._hover_ctrl == "play" else 70), 1.0))
+        p.setPen(QPen(alpha(self._accent, 150 if hot_play else 90), 1.2))
         p.drawEllipse(QPointF(cx, cy), 21, 21)
 
-        icon_col = QColor(255, 255, 255)
-        if self._media.get("playing"):
-            icons.pause(p, QRectF(cx - 6, cy - 8, 12, 16), icon_col)
+        if playing:
+            icons.pause(p, QRectF(cx - 5.5, cy - 7.5, 11, 15), QColor(255, 255, 255))
         else:
-            icons.play(p, QRectF(cx - 5, cy - 8, 14, 16), icon_col)
+            icons.play(p, QRectF(cx - 4.5, cy - 8, 13, 16), QColor(255, 255, 255))
 
-        dim = alpha(QColor(255, 255, 255), 230 if self._hover_ctrl == "prev" else 165)
-        icons.prev(p, QRectF(cx - 68, cy - 8, 17, 16), dim)
-        dim = alpha(QColor(255, 255, 255), 230 if self._hover_ctrl == "next" else 165)
-        icons.next_(p, QRectF(cx + 51, cy - 8, 17, 16), dim)
+        for name, ix, icon_fn in (
+            ("prev", cx - 78 + 17, icons.prev),
+            ("next", cx + 44 + 17, icons.next_),
+        ):
+            hot = self._hover_ctrl == name
+            if hot:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(alpha(QColor(255, 255, 255), 22))
+                p.drawEllipse(QPointF(ix, cy), 15, 15)
+            icon_fn(
+                p,
+                QRectF(ix - 8, cy - 7.5, 16, 15),
+                alpha(QColor(255, 255, 255), 250 if hot else 160),
+            )
 
     def _paint_clock(self, p: QPainter, r: QRectF):
         top = r.top()
-        p.setFont(f(58, QFont.Weight.Light, -1.0))
+        self._eyes.paint(
+            p,
+            QRectF(r.left() + 26, top + 24, 40.0, 20.0),
+            self._eye_color(),
+            force_happy=1.0,
+        )
+        p.setFont(f(50, QFont.Weight.Light, -1.2))
         p.setPen(C.text)
-        p.drawText(
-            QRectF(r.left() + 22, top + 14, 312, 74),
-            LC,
-            time.strftime("%H:%M"),
-        )
-        p.setFont(f(13, QFont.Weight.Medium))
+        p.drawText(QRectF(r.left() + 24, top + 52, 300, 62), LC, time.strftime("%H:%M"))
+        p.setFont(f(11.5, QFont.Weight.Medium))
         p.setPen(C.dim)
-        p.drawText(
-            QRectF(r.left() + 24, top + 92, 312, 20),
-            LC,
-            _vn_date(),
-        )
+        p.drawText(QRectF(r.left() + 26, top + 114, 300, 16), LC, _vn_date())
 
-        icons.note(p, QRectF(r.left() + 24, top + 126, 13, 13), C.faint)
-        p.setFont(f(11, QFont.Weight.Medium))
+        chip = QRectF(r.left() + 24, top + 138, 196, 22)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C.chip)
+        p.drawRoundedRect(chip, 11, 11)
+        icons.note(p, QRectF(chip.left() + 9, chip.center().y() - 5.5, 11, 11), C.faint)
+        p.setFont(f(9.5, QFont.Weight.Medium, 0.1))
         p.setPen(C.mute)
         p.drawText(
-            QRectF(r.left() + 44, top + 123, 300, 18),
+            QRectF(chip.left() + 26, chip.top(), chip.width() - 34, chip.height()),
             LC,
             "Chưa có nhạc đang phát",
         )
@@ -656,42 +877,41 @@ class Island(QWidget):
         batt = s.get("batt")
 
         rows = [
-            ("CPU", icons.cpu, f"{cpu:.0f}%", cpu / 100.0, self._level_color(cpu)),
-            ("RAM", icons.ram, f"{ram:.0f}%", ram / 100.0, self._level_color(ram)),
-            ("NET", icons.net, fmt_rate(down), clamp(down / (12 * 1024 * 1024), 0.03, 1.0), C.accent),
+            ("CPU", f"{cpu:.0f}%", cpu / 100.0, self._level_color(cpu)),
+            ("RAM", f"{ram:.0f}%", ram / 100.0, self._level_color(ram)),
+            ("NET", fmt_rate(down), clamp(down / (12 * 1024 * 1024), 0.03, 1.0), self._accent),
         ]
         if batt is not None:
             rows.append(
                 (
                     "PIN",
-                    icons.battery,
                     f"{batt:.0f}%",
                     batt / 100.0,
-                    C.green if batt > 30 else C.red,
+                    alpha(C.green if batt > 30 else C.red, 215),
                 )
             )
 
-        top = r.top() + 22
-        step = 36.0
-        for i, (label, icon_fn, value, frac, color) in enumerate(rows):
-            y = top + i * step
-            if label == "PIN":
-                icon_fn(p, QRectF(x, y + 3, 12, 12), C.mute, frac, bool(s.get("charging")))
-            else:
-                icon_fn(p, QRectF(x, y + 3, 12, 12), C.mute)
-            p.setFont(f(9.5, QFont.Weight.DemiBold, 0.8))
-            p.setPen(C.mute)
-            p.drawText(QRectF(x + 18, y, 34, 18), LC, label)
+        pitch = 33.0
+        content_h = (len(rows) - 1) * pitch + 24.0
+        top = r.top() + (r.height() - content_h) / 2.0 - 2.0
 
-            p.setFont(f(11, QFont.Weight.DemiBold))
+        for i, (label, value, frac, color) in enumerate(rows):
+            y = top + i * pitch
+            p.setFont(f(8.5, QFont.Weight.DemiBold, 0.85))
+            p.setPen(C.mute)
+            p.drawText(QRectF(x, y, w * 0.5, 14), LC, label)
+
+            p.setFont(f(11.0, QFont.Weight.DemiBold, 0.1))
             p.setPen(C.dim)
-            p.drawText(QRectF(x + 38, y, w - 38, 18), RC, value)
+            p.drawText(QRectF(x + w * 0.5, y, w * 0.5, 14), RC, value)
 
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(C.track)
-            p.drawRoundedRect(QRectF(x, y + 24, w, 3), 1.5, 1.5)
+            p.drawRoundedRect(QRectF(x, y + 19, w, 2.5), 1.25, 1.25)
             p.setBrush(color)
-            p.drawRoundedRect(QRectF(x, y + 24, max(3.0, w * clamp(frac, 0.0, 1.0)), 3), 1.5, 1.5)
+            p.drawRoundedRect(
+                QRectF(x, y + 19, max(3.0, w * clamp(frac, 0.0, 1.0)), 2.5), 1.25, 1.25
+            )
 
     @staticmethod
     def _level_color(pct: float) -> QColor:
@@ -704,37 +924,47 @@ class Island(QWidget):
     def _paint_notif(self, p: QPainter, r: QRectF):
         n = self._notif or {}
         app = n.get("app", "Ứng dụng")
-        box = QRectF(r.left() + 20, r.top() + 31, 46, 46)
         col = _app_color(app)
+        box = QRectF(r.left() + 22, r.center().y() - 22, 44, 44)
+
+        halo = QRadialGradient(box.center(), 52)
+        halo.setColorAt(0.0, alpha(col, 90))
+        halo.setColorAt(1.0, alpha(col, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(halo))
+        p.drawEllipse(box.center(), 52, 52)
 
         path = QPainterPath()
-        path.addRoundedRect(box, 14, 14)
+        path.addRoundedRect(box, 13, 13)
         g = QLinearGradient(box.topLeft(), box.bottomRight())
-        g.setColorAt(0.0, mix(col, QColor(255, 255, 255), 0.10))
-        g.setColorAt(1.0, mix(col, QColor(0, 0, 0), 0.28))
+        g.setColorAt(0.0, mix(col, QColor(255, 255, 255), 0.16))
+        g.setColorAt(1.0, mix(col, QColor(0, 0, 0), 0.30))
         p.fillPath(path, QBrush(g))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(alpha(QColor(255, 255, 255), 44), 1.0))
+        p.drawPath(path)
 
-        p.setFont(f(20, QFont.Weight.DemiBold))
-        p.setPen(alpha(QColor(255, 255, 255), 240))
+        p.setFont(f(19, QFont.Weight.DemiBold))
+        p.setPen(alpha(QColor(255, 255, 255), 245))
         p.drawText(box, CC, app[:1].upper())
 
-        x = box.right() + 14
-        w = r.right() - 22 - x
+        x = box.right() + 16
+        w = r.right() - 24 - x - 46
 
-        app_font = f(9.5, QFont.Weight.DemiBold, 1.1)
+        app_font = f(9.0, QFont.Weight.DemiBold, 1.0)
         p.setFont(app_font)
-        p.setPen(C.mute)
-        p.drawText(
-            QRectF(x, r.top() + 22, w, 14),
-            LC,
-            _elide(app.upper(), app_font, w),
-        )
+        p.setPen(alpha(QColor(255, 255, 255), 148))
+        p.drawText(QRectF(x, r.top() + 24, w, 13), LC, _elide(app.upper(), app_font, w))
 
-        title_font = f(13.5, QFont.Weight.DemiBold)
+        p.setFont(f(8.5, QFont.Weight.Medium, 0.2))
+        p.setPen(C.faint)
+        p.drawText(QRectF(r.right() - 24 - 44, r.top() + 24, 44, 13), RC, "bây giờ")
+
+        title_font = f(13.5, QFont.Weight.DemiBold, -0.1)
         p.setFont(title_font)
         p.setPen(C.text)
         p.drawText(
-            QRectF(x, r.top() + 39, w, 20),
+            QRectF(x, r.top() + 38, w, 19),
             LC,
             _elide(n.get("title", ""), title_font, w),
         )
@@ -743,7 +973,7 @@ class Island(QWidget):
         p.setFont(body_font)
         p.setPen(C.dim)
         p.drawText(
-            QRectF(x, r.top() + 60, w, 18),
+            QRectF(x, r.top() + 59, w, 17),
             LC,
             _elide(n.get("body", ""), body_font, w),
         )
@@ -761,7 +991,8 @@ class Island(QWidget):
         self._collapse.stop()
         self._badge = False
         if self._state == NOTIF:
-            self._notif_until = 0.0
+            # đang hiện thông báo mà chuột lướt vào: giữ thêm, đừng tắt ngang
+            self._notif_until = max(self._notif_until, time.monotonic() + 3.0)
         self.refresh()
 
     def leaveEvent(self, _event):
@@ -850,9 +1081,9 @@ class Island(QWidget):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(
-            "QMenu{background:#1b1b22;color:#fff;border:1px solid rgba(255,255,255,0.10);"
-            "border-radius:10px;padding:6px;font-size:12px;}"
-            "QMenu::item{padding:6px 18px;border-radius:6px;}"
+            "QMenu{background:#0d0d11;color:#fff;border:1px solid rgba(255,255,255,0.10);"
+            "border-radius:12px;padding:6px;font-size:12px;}"
+            "QMenu::item{padding:6px 18px;border-radius:7px;}"
             "QMenu::item:selected{background:rgba(255,255,255,0.10);}"
             "QMenu::separator{height:1px;background:rgba(255,255,255,0.08);margin:5px 8px;}"
         )
@@ -876,8 +1107,14 @@ def _mmss(seconds: float) -> str:
 
 
 _VN_DAYS = ["Thứ hai", "Thứ ba", "Thứ tư", "Thứ năm", "Thứ sáu", "Thứ bảy", "Chủ nhật"]
+_VN_SHORT = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
 
 
 def _vn_date() -> str:
     t = time.localtime()
     return f"{_VN_DAYS[t.tm_wday]}, {t.tm_mday:02d}/{t.tm_mon:02d}/{t.tm_year}"
+
+
+def _vn_short() -> str:
+    t = time.localtime()
+    return f"{_VN_SHORT[t.tm_wday]} · {t.tm_mday:02d}/{t.tm_mon:02d}"

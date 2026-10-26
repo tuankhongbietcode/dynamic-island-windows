@@ -106,6 +106,7 @@ def main() -> int:
     monitor.updated.connect(island.set_stats)
     media.changed.connect(island.set_media)
     notifier.arrived.connect(island.push_notification)
+    notifier.status.connect(lambda s: print("[notify]", s, flush=True))
     island.action_requested.connect(media.send)
 
     media.start()

@@ -3,13 +3,30 @@
 Viên đảo nổi ở giữa mép trên màn hình: nhạc đang phát, thông báo Windows, đồng hồ và thông số máy.
 Toàn bộ code chạy trên máy bạn — không tải exe lạ, không gọi mạng, không cài service.
 
-| Thu gọn | Mở rộng |
+| Thu gọn — đang phát | Thu gọn — rảnh rỗi |
 |---|---|
-| ![thu gọn](preview/compact.png) | ![mở rộng](preview/expanded.png) |
+| ![thu gọn](preview/compact.png) | ![rảnh](preview/idle.png) |
 
-| Thông báo | Không có nhạc |
+| Mở rộng — nhạc | Mở rộng — đồng hồ |
 |---|---|
-| ![thông báo](preview/notif.png) | ![đồng hồ](preview/expanded_idle.png) |
+| ![mở rộng](preview/expanded.png) | ![đồng hồ](preview/expanded_idle.png) |
+
+| Thông báo | |
+|---|---|
+| ![thông báo](preview/notif.png) | |
+
+## Thiết kế
+
+Lấy cảm hứng từ mấy app notch kiểu macOS (Notchy, Nusa): nền **đen tuyền** thay vì xám, viền
+sáng 1px, và **đôi mắt linh vật** — thứ làm nó sống hơn hẳn một widget thông thường.
+
+- **Mắt**: chớp ngẫu nhiên 2–6 giây, nhìn theo con trỏ khi rê chuột lên, cong `^ ^` khi có nhạc,
+  lim dim ngủ (kèm chữ `z` bay lên) sau ~35 giây không có gì.
+- **Nền**: đen `#000` pha chút xanh ở đỉnh, cộng quầng sáng rất nhẹ lấy màu từ bìa album.
+- **Chữ**: tên bài dài tự chạy ngang, mờ dần ở mép phải thay vì cắt cụt.
+- **Bung/thu**: 360 ms `OutExpo` cho kích thước; nội dung trượt lên ~7 px và mờ dần vào.
+- **Sóng nhạc**: 4 thanh mảnh, màu nhấn đổi theo bìa đĩa.
+- **Nút điều khiển**: play tròn 42 px viền màu nhấn, sáng lên khi rê chuột; prev/next có quầng tròn.
 
 ## Cần gì
 
@@ -39,10 +56,10 @@ Muốn tự khởi động cùng Windows: chuột phải lên island → **Khở
 
 Khi thu nhỏ:
 
-- **Có nhạc** → hiện bìa album + sóng nhạc + tên bài + giờ.
-- **Không có nhạc** → chỉ hiện giờ.
+- **Có nhạc** → bìa album + sóng nhạc + tên bài + đôi mắt ở cuối.
+- **Không có nhạc** → đôi mắt + giờ + thứ/ngày.
 
-Khi có thông báo Windows → island tự bung thành thẻ thông báo 5 giây rồi thu lại.
+Khi có thông báo Windows → island tự bung thành thẻ thông báo 6 giây rồi thu lại.
 Nếu đang mở rộng thì chỉ hiện chấm đỏ ở góc, không cắt ngang việc bạn đang làm.
 
 ## Thông báo Teams / Outlook / mail
@@ -85,12 +102,16 @@ Xoá file này để về mặc định.
 - Cửa sổ là `QWidget` frameless + `WA_TranslucentBackground`, toàn bộ vẽ bằng `QPainter`
   (bo góc, gradient, bóng đổ blur, icon vector) nên không có file ảnh nào.
 - Hoạt cảnh bung/thu là `QVariantAnimation` nội suy đồng thời kích thước và bán kính góc
-  (300 ms, OutCubic).
+  (360 ms, OutExpo).
+- Nền + bóng đổ được render một lần rồi cache thành `QPixmap` theo kích thước/màu nhấn; mỗi
+  khung hình chỉ blit lại, nên lúc phát nhạc CPU ~1–2% (một nhân).
+- Nhịp vẽ tự thích ứng: 30 fps khi đang chớp mắt / chạy chữ / rê chuột, 15 fps khi chỉ có sóng
+  nhạc, 1 fps khi rảnh.
 - `media.py` và `notify.py` chạy trong `QThread` riêng, mỗi thread có asyncio loop cho WinRT;
   giao tiếp với UI qua `Signal`.
 - Chạy `python main.py` để xem log; `python snapshot.py` để xuất ảnh từng trạng thái vào `preview/`.
-- Cần soi kỹ sự kiện chuột / lệnh media: đặt `ISLAND_DEBUG=1` rồi chạy, log ghi vào
-  `%APPDATA%\DynamicIsland\debug.log`.
+- Cần soi kỹ sự kiện chuột / lệnh media / chuyển trạng thái: đặt `ISLAND_DEBUG=1` rồi chạy,
+  log ghi vào `%APPDATA%\DynamicIsland\debug.log`.
 
 ## Giấy phép
 

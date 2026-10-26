@@ -10,6 +10,11 @@ python-path.txt
 
 # Ảnh chụp desktop thật (có thể lộ nội dung máy) - chỉ commit ảnh render sạch
 preview/live*.png
+preview/zoom_*.png
+
+# Ảnh tham khảo + script tiện tay khi phát triển
+ref/
+dev_kill.py
 
 # Hệ điều hành
 Thumbs.db
