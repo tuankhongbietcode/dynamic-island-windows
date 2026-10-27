@@ -215,7 +215,6 @@ class Island(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowDoesNotAcceptFocus
             | Qt.WindowType.NoDropShadowWindowHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -571,9 +570,10 @@ class Island(QWidget):
     def _is_other_app_foreground(self) -> bool:
         """True khi một ứng dụng THẬT đang chiếm foreground.
 
-        Đảo dùng WindowDoesNotAcceptFocus nên nó không bao giờ là foreground.
-        Vì vậy phải phân biệt: desktop/traybar (user đang nhìn đảo -> vẫn động)
-        với ứng dụng khác (user đang làm việc -> đảo đứng yên cho tiết kiệm).
+        Đảo hiện lên bằng WA_ShowWithoutActivating nên hầu như không bao giờ
+        là foreground; nếu chính nó đang foreground (vừa được click) thì coi
+        như không có app khác. Phân biệt desktop/traybar (user đang nhìn đảo
+        -> vẫn động) với ứng dụng khác (user đang làm việc -> đảo đứng yên).
         """
         try:
             hwnd = int(ctypes.windll.user32.GetForegroundWindow())
