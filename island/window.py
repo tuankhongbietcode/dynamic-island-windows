@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons
+from .audio import Volume
 from .debug import dbg
 from .eyes import Eyes
 from .monitor import fmt_rate
@@ -209,6 +210,16 @@ class Island(QWidget):
         self._sh_cache: dict = {}
         self._chrome_key = None
         self._chrome_px = QPixmap()
+
+        # âm lượng hệ thống
+        self._volume = Volume()
+        self._vol_level, self._vol_muted = self._volume.refresh()
+        self._vol_drag = False
+        self._vol_rect = QRectF()
+        self._vol_timer = QTimer(self)
+        self._vol_timer.setInterval(900)
+        self._vol_timer.timeout.connect(self._poll_volume)
+        self._vol_timer.start()
 
         self._m_from = (w, h, r)
         self._m_to = (w, h, r)
@@ -422,6 +433,8 @@ class Island(QWidget):
         r0 = self._radius
         w1, h1, r1 = SIZES[state]
         self._state = state
+        if state == EXPANDED:
+            self._vol_level, self._vol_muted = self._volume.refresh()
         self._hits = {}
         self._hover_ctrl = None
         self._morph.stop()
@@ -520,6 +533,31 @@ class Island(QWidget):
         if changed:
             # chỉ vẽ lại khi trạng thái thật sự đổi, không vẽ vô ích mỗi 400ms
             self.update()
+
+    # ------------------------------------------------------------ âm lượng
+    def _poll_volume(self):
+        if self._state != EXPANDED or self._vol_drag:
+            return
+        level, muted = self._volume.refresh()
+        if abs(level - self._vol_level) > 0.004 or muted != self._vol_muted:
+            self._vol_level, self._vol_muted = level, muted
+            self.update()
+
+    def _set_vol_at(self, x: float):
+        rect = self._vol_rect
+        if rect.width() <= 1:
+            return
+        frac = clamp((x - rect.left()) / rect.width(), 0.0, 1.0)
+        self._vol_level = frac
+        if self._vol_muted and frac > 0.0:
+            self._vol_muted = False
+        self._volume.set_level(frac)
+        self.update()
+
+    def _toggle_mute(self):
+        self._volume.toggle_mute()
+        self._vol_level, self._vol_muted = self._volume.refresh()
+        self.update()
 
     def _tick_ui(self):
         self._tick_n += 1
@@ -820,6 +858,7 @@ class Island(QWidget):
 
     def _paint_expanded(self, p: QPainter, r: QRectF):
         has = self._media.get("has")
+        self._hits = {}
 
         if has:
             self._eyes.paint(
@@ -947,11 +986,11 @@ class Island(QWidget):
 
         cx = x + w / 2.0
         cy = top + 134.0
-        self._hits = {
+        self._hits.update({
             "prev": QRectF(cx - 78, cy - 17, 34, 34),
             "play": QRectF(cx - 22, cy - 22, 44, 44),
             "next": QRectF(cx + 44, cy - 17, 34, 34),
-        }
+        })
 
         playing = bool(self._media.get("playing"))
         hot_play = self._hover_ctrl == "play"
@@ -1056,6 +1095,41 @@ class Island(QWidget):
                 QRectF(x, y + 19, max(3.0, w * clamp(frac, 0.0, 1.0)), 2.5), 1.25, 1.25
             )
 
+        # --- âm lượng hệ thống ---
+        vy = r.top() + 156.0
+        muted = self._vol_muted
+        icons.speaker(
+            p,
+            QRectF(x, vy + 2, 11, 11),
+            C.red if muted else C.dim,
+            muted,
+        )
+        self._hits["mute"] = QRectF(x - 3, vy - 2, 17, 16)
+
+        tw = w - 16 - 30
+        tx = x + 16
+        ty = vy + 7.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C.track)
+        p.drawRoundedRect(QRectF(tx, ty, tw, 3.0), 1.5, 1.5)
+        lvl = 0.0 if muted else clamp(self._vol_level, 0.0, 1.0)
+        if lvl > 0.004:
+            p.setBrush(alpha(C.accent, 215))
+            p.drawRoundedRect(QRectF(tx, ty, max(3.0, tw * lvl), 3.0), 1.5, 1.5)
+        kx = tx + tw * lvl
+        p.setBrush(alpha(QColor(255, 255, 255), 55))
+        p.drawEllipse(QPointF(kx, ty + 1.5), 4.3, 4.3)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawEllipse(QPointF(kx, ty + 1.5), 2.4, 2.4)
+
+        self._vol_rect = QRectF(tx, ty - 6.0, tw, 15.0)
+        self._hits["vol"] = self._vol_rect
+
+        p.setFont(f(8.5, QFont.Weight.DemiBold, 0.2))
+        p.setPen(C.red if muted else C.dim)
+        label = "Tắt" if muted else f"{round(self._vol_level * 100)}%"
+        p.drawText(QRectF(x + w - 28, vy, 28, 16), RC, label)
+
     @staticmethod
     def _level_color(pct: float) -> QColor:
         if pct >= 85:
@@ -1152,6 +1226,9 @@ class Island(QWidget):
             self.refresh()
 
     def mouseMoveEvent(self, event):
+        if self._vol_drag:
+            self._set_vol_at(event.position().x())
+            return
         if self._press is not None:
             delta = event.globalPosition().toPoint() - self._press
             if not self._dragged and delta.manhattanLength() > 5:
@@ -1179,14 +1256,25 @@ class Island(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             dbg("press", event.position(), "state", self._state)
+            hit = self._hit_at(event.position())
+            if hit == "vol":
+                self._vol_drag = True
+                self._set_vol_at(event.position().x())
+                event.accept()
+                return
             self._press = event.globalPosition().toPoint()
             self._press_geo = self.geometry().topLeft()
             self._dragged = False
-            self._press_hit = self._hit_at(event.position())
+            self._press_hit = hit
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton or self._press is None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._vol_drag:
+            self._vol_drag = False
+            return
+        if self._press is None:
             return
         self._press = None
         if self._dragged:
@@ -1195,6 +1283,11 @@ class Island(QWidget):
             return
         hit = self._press_hit or self._hit_at(event.position())
         dbg("release hit", hit, "state", self._state, "dragged", self._dragged)
+        if hit == "mute":
+            self._toggle_mute()
+            return
+        if hit == "vol":
+            return
         if hit and self._media.get("has"):
             self.action_requested.emit(hit)
         elif self._state == EXPANDED:

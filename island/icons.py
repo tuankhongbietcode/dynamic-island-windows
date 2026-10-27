@@ -157,3 +157,48 @@ def bell(p: QPainter, r: QRectF, color: QColor):
         QPointF(r.x() + r.width() * 0.42, r.y() + r.height() * 0.80),
         QPointF(r.x() + r.width() * 0.58, r.y() + r.height() * 0.80),
     )
+
+
+def speaker(p: QPainter, r: QRectF, color: QColor, muted: bool = False):
+    """Loa + sóng âm; gạch chéo khi tắt tiếng."""
+    _stroke(p, color, 1.2)
+    path = QPainterPath()
+    path.moveTo(QPointF(r.x() + r.width() * 0.10, r.y() + r.height() * 0.40))
+    path.lineTo(QPointF(r.x() + r.width() * 0.30, r.y() + r.height() * 0.40))
+    path.lineTo(QPointF(r.x() + r.width() * 0.52, r.y() + r.height() * 0.20))
+    path.lineTo(QPointF(r.x() + r.width() * 0.52, r.y() + r.height() * 0.80))
+    path.lineTo(QPointF(r.x() + r.width() * 0.30, r.y() + r.height() * 0.60))
+    path.lineTo(QPointF(r.x() + r.width() * 0.10, r.y() + r.height() * 0.60))
+    path.closeSubpath()
+    p.drawPath(path)
+
+    if muted:
+        p.drawLine(
+            QPointF(r.x() + r.width() * 0.66, r.y() + r.height() * 0.36),
+            QPointF(r.x() + r.width() * 0.92, r.y() + r.height() * 0.64),
+        )
+        p.drawLine(
+            QPointF(r.x() + r.width() * 0.92, r.y() + r.height() * 0.36),
+            QPointF(r.x() + r.width() * 0.66, r.y() + r.height() * 0.64),
+        )
+    else:
+        p.drawArc(
+            QRectF(
+                r.x() + r.width() * 0.52,
+                r.y() + r.height() * 0.30,
+                r.width() * 0.20,
+                r.height() * 0.40,
+            ),
+            -55 * 16,
+            110 * 16,
+        )
+        p.drawArc(
+            QRectF(
+                r.x() + r.width() * 0.60,
+                r.y() + r.height() * 0.18,
+                r.width() * 0.34,
+                r.height() * 0.64,
+            ),
+            -55 * 16,
+            110 * 16,
+        )

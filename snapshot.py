@@ -103,6 +103,8 @@ def main():
 
     island.set_stats(stats)
     island.set_media(media)
+    island._vol_level = 0.62
+    island._vol_muted = False
 
     shots = []
 
