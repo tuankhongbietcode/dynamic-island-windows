@@ -15,7 +15,13 @@ If Not fso.FileExists(pyw) Then
     txt = base & "\python-path.txt"
     If fso.FileExists(txt) Then
         Set f = fso.OpenTextFile(txt, 1)
-        If Not f.AtEndOfStream Then pyw = Trim(f.ReadLine())
+        Do While Not f.AtEndOfStream
+            pyw = Trim(f.ReadLine())
+            ' Bỏ qua dòng trống và dòng comment
+            If Len(pyw) > 0 And Left(pyw, 1) <> "#" Then
+                Exit Do
+            End If
+        Loop
         f.Close
     End If
 End If

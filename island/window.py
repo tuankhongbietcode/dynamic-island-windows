@@ -22,7 +22,6 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QFont,
-    QFontMetricsF,
     QImage,
     QLinearGradient,
     QPainter,
@@ -43,7 +42,7 @@ from . import icons
 from .debug import dbg
 from .eyes import Eyes
 from .monitor import fmt_rate
-from .theme import C, PAD, alpha, clamp, f, lerp, mix, rgba
+from .theme import C, PAD, alpha, clamp, f, fm, lerp, mix, rgba
 
 IDLE = "idle"
 COMPACT = "compact"
@@ -81,7 +80,7 @@ EXP_STAT_W = 112.0
 
 
 def _elide(text: str, font: QFont, width: float) -> str:
-    return QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, width)
+    return fm(font).elidedText(text, Qt.TextElideMode.ElideRight, width)
 
 
 # cờ canh lề + ép một dòng (Qt::TextSingleLine)
@@ -207,8 +206,7 @@ class Island(QWidget):
         self._dragged = False
         self._press_hit = None
 
-        self._sh_key = None
-        self._sh_px = QPixmap()
+        self._sh_cache: dict = {}
         self._chrome_key = None
         self._chrome_px = QPixmap()
 
@@ -449,7 +447,13 @@ class Island(QWidget):
         t = float(value)
         w0, h0, r0 = self._m_from
         w1, h1, r1 = self._m_to
-        self._size = QSizeF(lerp(w0, w1, t), lerp(h0, h1, t))
+        w = lerp(w0, w1, t)
+        h = lerp(h0, h1, t)
+        # OutExpo chạy ~60 fps và có đuôi rất mịn: bỏ qua khung hình đổi < 1px
+        # để khỏi resize cửa sổ + dựng lại nền vô ích.
+        if t < 1.0 and abs(w - self._size.width()) < 1.0 and abs(h - self._size.height()) < 1.0:
+            return
+        self._size = QSizeF(w, h)
         self._radius = lerp(r0, r1, t)
         self._reposition()
         self.update()
@@ -531,11 +535,16 @@ class Island(QWidget):
                 dx = QCursor.pos().x() - self.mapToGlobal(self.rect().center()).x()
             self._eyes.tick(playing, self._hover, dx, time.monotonic() - self._idle_since)
 
-        # 30 fps: rê chuột, chữ chạy, hoặc đang chớp mắt (kể cả khung đóng mắt cuối)
+        # Chỉ vẽ lại khi có hoạt cảnh thật sự. Trước đây hễ rê chuột là vẽ 30 fps
+        # bất kể có gì đổi hay không — đó là nguồn gây giật khi hover / kéo thả.
+        blink_on = self._eyes.blink > 0.01 or prev_blink > 0.01
         if self._hover:
-            self.update()
+            if self._marq or blink_on:
+                self.update()          # 30 fps: chữ chạy hoặc đang chớp mắt
+            elif playing and self._tick_n % 2 == 0:
+                self.update()          # 15 fps: sóng nhạc / thanh tiến trình
             return
-        if not frozen and (self._marq or self._eyes.blink > 0.01 or prev_blink > 0.01):
+        if not frozen and (self._marq or blink_on):
             self.update()
             return
         # 15 fps: sóng nhạc
@@ -574,7 +583,12 @@ class Island(QWidget):
         cp.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
-        cp.drawPixmap(0, 0, self._shadow(pill.width(), pill.height(), self._radius))
+        sh_px, sw, sh = self._shadow_for(pill.width(), pill.height())
+        cp.drawPixmap(
+            QRectF(pill.left(), pill.top(), pill.width(), pill.height()),
+            sh_px,
+            QRectF(PAD, PAD, sw, sh),
+        )
 
         path = QPainterPath()
         path.addRoundedRect(pill, self._radius, self._radius)
@@ -655,10 +669,8 @@ class Island(QWidget):
             p.setBrush(C.red)
             p.drawEllipse(QPointF(cx, cy), 3.0, 3.0)
 
-    def _shadow(self, w: float, h: float, r: float) -> QPixmap:
-        key = (round(w / 4), round(h / 4), round(r / 4))
-        if key == self._sh_key:
-            return self._sh_px
+    def _render_shadow(self, w: float, h: float, r: float) -> QPixmap:
+        """Vẽ bóng đổ blur cho một kích thước (gọi một lần cho mỗi trạng thái)."""
         pw, ph = round(w + 2 * PAD), round(h + 2 * PAD)
         src = QPixmap(pw, ph)
         src.fill(Qt.GlobalColor.transparent)
@@ -684,10 +696,27 @@ class Island(QWidget):
         op = QPainter(out)
         scene.render(op, QRectF(0, 0, pw, ph), QRectF(0, 0, pw, ph))
         op.end()
-
-        self._sh_key = key
-        self._sh_px = out
         return out
+
+    def _shadow_for(self, w: float, h: float):
+        """(pixmap, sw, sh) — mẫu bóng gần nhất trong 4 kích thước trạng thái.
+
+        Mỗi kích thước chỉ blur một lần rồi cache, nên lúc nghỉ bóng luôn đúng nét;
+        lúc bung/thu chỉ co giãn nhẹ từ mẫu gần nhất (không thấy khác biệt khi
+        đang chuyển động).
+        """
+        best = None
+        for _st, (sw, sh, sr) in SIZES.items():
+            d = abs(sw - w) + abs(sh - h)
+            if best is None or d < best[0]:
+                best = (d, sw, sh, sr)
+        _d, sw, sh, sr = best
+        key = (sw, sh)
+        px = self._sh_cache.get(key)
+        if px is None:
+            px = self._render_shadow(sw, sh, sr)
+            self._sh_cache[key] = px
+        return px, sw, sh
 
     # ------------------------------------------------------------- nội dung
     def _eye_color(self) -> QColor:
@@ -698,8 +727,8 @@ class Island(QWidget):
         date = _vn_short()
         clock_font = f(13.5, QFont.Weight.DemiBold, 0.2)
         date_font = f(8.5, QFont.Weight.Medium, 0.35)
-        fm_c = QFontMetricsF(clock_font)
-        fm_d = QFontMetricsF(date_font)
+        fm_c = fm(clock_font)
+        fm_d = fm(date_font)
         block_w = max(fm_c.horizontalAdvance("00:00"), fm_d.horizontalAdvance(date))
         eye_w, gap = 20.0, 11.0
         total = eye_w + gap + block_w
@@ -824,13 +853,13 @@ class Island(QWidget):
         speed: float = 24.0,
         gap: float = 34.0,
     ):
-        fm = QFontMetricsF(font)
+        m = fm(font)
         p.setFont(font)
         p.setPen(color)
         if not text:
             self._marq = False
             return
-        if fm.horizontalAdvance(text) <= rect.width():
+        if m.horizontalAdvance(text) <= rect.width():
             self._marq = False
             p.drawText(rect, LC, text)
             return
@@ -840,10 +869,10 @@ class Island(QWidget):
         if text != self._marq_key:
             self._marq_key = text
             self._marq_t0 = now
-        span = fm.horizontalAdvance(text) + gap
+        span = m.horizontalAdvance(text) + gap
         elapsed = max(0.0, now - self._marq_t0 - 1.4)
         off = (elapsed * speed) % span
-        base = rect.top() + (rect.height() + fm.ascent() - fm.descent()) / 2.0
+        base = rect.top() + (rect.height() + m.ascent() - m.descent()) / 2.0
 
         p.save()
         p.setClipRect(rect)

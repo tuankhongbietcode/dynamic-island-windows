@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QFontDatabase
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetricsF
 
 # Vùng đệm quanh viên đảo để vẽ bóng đổ
 PAD = 22
@@ -60,6 +60,8 @@ class C:
 
 
 _FAMILY: str | None = None
+_FONT_CACHE: dict = {}
+_FM_CACHE: dict = {}
 
 
 def family() -> str:
@@ -76,13 +78,30 @@ def family() -> str:
 
 
 def f(size: float, weight: QFont.Weight = QFont.Weight.Normal, spacing: float = 0.0) -> QFont:
+    # Cache theo tham số: tạo QFont mỗi khung hình rất tốn (Qt phải phân giải font).
+    key = (round(size * 4), int(weight), round(spacing * 100))
+    hit = _FONT_CACHE.get(key)
+    if hit is not None:
+        return hit
     font = QFont(family())
     font.setPixelSize(max(1, round(size)))
     font.setWeight(weight)
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     if spacing:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+    _FONT_CACHE[key] = font
     return font
+
+
+def fm(font: QFont) -> QFontMetricsF:
+    """QFontMetricsF dùng chung theo font — tránh dựng lại mỗi lần đo chữ."""
+    key = (font.family(), font.pixelSize(), int(font.weight()), round(font.letterSpacing(), 2))
+    hit = _FM_CACHE.get(key)
+    if hit is not None:
+        return hit
+    metrics = QFontMetricsF(font)
+    _FM_CACHE[key] = metrics
+    return metrics
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
