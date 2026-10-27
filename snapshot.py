@@ -17,7 +17,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
-from island.window import COMPACT, EXPANDED, IDLE, NOTIF, Island
+from island.window import COMPACT, EXPANDED, IDLE, NOTIF, SHELF, Island
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview")
 BG_W, BG_H = 900, 340
@@ -138,6 +138,21 @@ def main():
     island._notif_until = 0.0
     island.set_media({"has": False})
     shot("expanded_idle", EXPANDED, happy=0.0, sleep=0.0)
+
+    # kệ file: có sẵn vài file
+    island._shelf = [
+        {"path": "C:/Users/T/anh-bia.png", "name": "anh-bia-halloween.png", "size": "2.4 MB", "type": "img"},
+        {"path": "C:/Users/T/nhac.mp3", "name": "WIDI HELLO - Ifan Seventeen.mp3", "size": "5.1 MB", "type": "aud"},
+        {"path": "C:/Users/T/bao-cao.pdf", "name": "Báo cáo tháng 10.pdf", "size": "880 KB", "type": "doc"},
+        {"path": "C:/Users/T/code.zip", "name": "source-code-final.zip", "size": "14.2 MB", "type": "arc"},
+    ]
+    island._shelf_open = True
+    shot("shelf", SHELF, happy=0.6)
+    island._shelf = []
+    island._dragging = True
+    shot("shelf_drop", SHELF, happy=0.4)
+    island._dragging = False
+    island._shelf_open = False
 
     bg = backdrop()
     for name, pm in shots:

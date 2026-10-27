@@ -159,6 +159,32 @@ def bell(p: QPainter, r: QRectF, color: QColor):
     )
 
 
+def file(p: QPainter, r: QRectF, color: QColor):
+    """Trang tài liệu: nền sáng, góc gập tô màu theo loại file."""
+    body = r.adjusted(r.width() * 0.16, r.height() * 0.10, -r.width() * 0.16, -r.height() * 0.10)
+    fold = body.width() * 0.34
+    path = QPainterPath()
+    path.moveTo(body.x(), body.y())
+    path.lineTo(body.right() - fold, body.y())
+    path.lineTo(body.right(), body.y() + fold)
+    path.lineTo(body.right(), body.bottom())
+    path.lineTo(body.x(), body.bottom())
+    path.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(232, 233, 240))
+    p.drawPath(path)
+    tri = QPainterPath()
+    tri.moveTo(body.right() - fold, body.y())
+    tri.lineTo(body.right(), body.y() + fold)
+    tri.lineTo(body.right() - fold, body.y() + fold)
+    tri.closeSubpath()
+    p.setBrush(color)
+    p.drawPath(tri)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    _stroke(p, color, 1.25)
+    p.drawPath(path)
+
+
 def speaker(p: QPainter, r: QRectF, color: QColor, muted: bool = False):
     """Loa + sóng âm; gạch chéo khi tắt tiếng."""
     _stroke(p, color, 1.2)

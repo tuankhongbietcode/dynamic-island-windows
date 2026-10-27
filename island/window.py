@@ -5,15 +5,19 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import math
+import os
 import time
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QPoint,
     QPointF,
     QRectF,
     QSizeF,
     Qt,
     QTimer,
+    QMimeData,
+    QUrl,
     QVariantAnimation,
     Signal,
 )
@@ -21,6 +25,12 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QDesktopServices,
+    QDrag,
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QFont,
     QImage,
     QLinearGradient,
@@ -49,6 +59,7 @@ IDLE = "idle"
 COMPACT = "compact"
 EXPANDED = "expanded"
 NOTIF = "notif"
+SHELF = "shelf"
 
 # (rộng, cao, bán kính góc)
 SIZES = {
@@ -56,7 +67,63 @@ SIZES = {
     COMPACT: (250, 42, 21.0),
     EXPANDED: (496, 184, 44.0),
     NOTIF: (440, 100, 34.0),
+    SHELF: (496, 208, 44.0),
 }
+
+# Màu theo loại file (cho icon kệ)
+_FILE_COLORS = {
+    "img": QColor(255, 106, 148),
+    "vid": QColor(159, 110, 232),
+    "aud": QColor(255, 167, 38),
+    "doc": QColor(91, 154, 255),
+    "arc": QColor(120, 200, 120),
+    "code": QColor(60, 200, 200),
+    "other": QColor(150, 156, 170),
+}
+_FILE_LABELS = {
+    "img": "IMG",
+    "vid": "VID",
+    "aud": "AUD",
+    "doc": "DOC",
+    "arc": "ZIP",
+    "code": "SRC",
+    "other": "FILE",
+}
+_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic", ".svg", ".tiff"}
+_VID_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv"}
+_AUD_EXT = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma"}
+_DOC_EXT = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".md", ".epub"}
+_ARC_EXT = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".iso"}
+_CODE_EXT = {".py", ".js", ".ts", ".html", ".css", ".cpp", ".c", ".h", ".java", ".json", ".xml", ".yml", ".yaml", ".sh", ".ps1", ".go", ".rs"}
+
+
+def _file_type(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _IMG_EXT:
+        return "img"
+    if ext in _VID_EXT:
+        return "vid"
+    if ext in _AUD_EXT:
+        return "aud"
+    if ext in _DOC_EXT:
+        return "doc"
+    if ext in _ARC_EXT:
+        return "arc"
+    if ext in _CODE_EXT:
+        return "code"
+    return "other"
+
+
+def _fmt_size(nbytes: int) -> str:
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    units = ["KB", "MB", "GB", "TB"]
+    v = nbytes / 1024.0
+    for u in units:
+        if v < 1024 or u == "TB":
+            return f"{v:.1f} {u}" if u != "KB" else f"{v:.0f} {u}"
+        v /= 1024.0
+    return f"{v:.1f} TB"
 
 # Lớp cửa sổ "nền" của Windows: user đang ở desktop/traybar, chưa vào app nào.
 # Khi đó đảo vẫn chớp mắt bình thường; chỉ đứng yên khi một app thật chiếm foreground.
@@ -154,6 +221,7 @@ class Island(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
         self.setWindowTitle("Dynamic Island")
 
         w, h, r = SIZES[IDLE]
@@ -174,6 +242,12 @@ class Island(QWidget):
         self._notif: dict | None = None
         self._notif_until = 0.0
         self._badge = False
+
+        # kệ file kéo-thả (kiểu Nusa)
+        self._shelf: list[dict] = []
+        self._shelf_open = False
+        self._dragging = False
+        self._chip_drag: dict | None = None  # {"path","press":QPointF} khi kéo 1 chip ra app khác
 
         self._art_px = QPixmap()
         self._art_big = QPixmap()
@@ -414,6 +488,8 @@ class Island(QWidget):
     def _desired_state(self) -> str:
         if self._notif_active():
             return NOTIF
+        if self._dragging or self._shelf_open:
+            return SHELF
         if self._pinned:
             return EXPANDED
         if self._hover and not self._suppressed:
@@ -606,7 +682,7 @@ class Island(QWidget):
             round(self._radius * 2),
             self._accent.rgb(),
             bool(self._media.get("has")),
-            self._state in (EXPANDED, NOTIF),
+            self._state in (EXPANDED, NOTIF, SHELF),
         )
         if key == self._chrome_key:
             return self._chrome_px
@@ -638,7 +714,7 @@ class Island(QWidget):
 
         cp.save()
         cp.setClipPath(path)
-        big = self._state in (EXPANDED, NOTIF)
+        big = self._state in (EXPANDED, NOTIF, SHELF)
         if self._media.get("has"):
             glow = QRadialGradient(
                 QPointF(pill.left() + (76 if big else 42), pill.center().y()),
@@ -695,6 +771,8 @@ class Island(QWidget):
             self._paint_compact(p, pill)
         elif self._state == EXPANDED:
             self._paint_expanded(p, pill)
+        elif self._state == SHELF:
+            self._paint_shelf(p, pill)
         else:
             self._paint_notif(p, pill)
         p.restore()
@@ -706,6 +784,19 @@ class Island(QWidget):
             p.drawEllipse(QPointF(cx, cy), 5.5, 5.5)
             p.setBrush(C.red)
             p.drawEllipse(QPointF(cx, cy), 3.0, 3.0)
+
+        # huy hiệu đếm file trên kệ (trạng thái nhỏ)
+        if self._shelf and self._state in (IDLE, COMPACT):
+            cx, cy = pill.left() + 13, pill.top() + 13
+            n = len(self._shelf)
+            label = str(n)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(alpha(C.accent, 72))
+            p.drawEllipse(QPointF(cx, cy), 8.5, 8.5)
+            p.setBrush(C.text)
+            mf = fm(f(9, QFont.Weight.DemiBold))
+            p.setFont(f(9, QFont.Weight.DemiBold))
+            p.drawText(QRectF(cx - 8.5, cy - 8.5, 17, 17), Qt.AlignmentFlag.AlignCenter, label)
 
     def _render_shadow(self, w: float, h: float, r: float) -> QPixmap:
         """Vẽ bóng đổ blur cho một kích thước (gọi một lần cho mỗi trạng thái)."""
@@ -1138,6 +1229,89 @@ class Island(QWidget):
             return C.amber
         return C.accent
 
+    def _paint_shelf(self, p: QPainter, r: QRectF):
+        self._hits = {}
+        pad = 22
+        # --- header ---
+        p.setFont(f(13, QFont.Weight.DemiBold))
+        p.setPen(C.text)
+        p.drawText(QRectF(r.left() + pad, r.top() + 10, 200, 24), LC, "Kệ file")
+        cx = r.right() - 21
+        cy = r.top() + 22
+        cr = 10
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C.chip)
+        p.drawEllipse(QPointF(cx, cy), cr, cr)
+        p.setPen(C.dim)
+        p.setFont(f(14, QFont.Weight.DemiBold))
+        p.drawText(QRectF(cx - cr, cy - cr, cr * 2, cr * 2), Qt.AlignmentFlag.AlignCenter, "×")
+        self._hits["shelf_close"] = QRectF(cx - cr - 5, cy - cr - 5, cr * 2 + 10, cr * 2 + 10)
+
+        top = r.top() + 40
+        if not self._shelf:
+            msg = "Thả file vào đây để lưu tạm" if not self._dragging else "Thả để thêm vào kệ"
+            p.setFont(f(12, QFont.Weight.Medium))
+            p.setPen(C.dim)
+            p.drawText(
+                QRectF(r.left() + pad, top, r.width() - pad * 2, r.bottom() - top - 14),
+                Qt.AlignmentFlag.AlignCenter,
+                msg,
+            )
+            if self._dragging:
+                p.setPen(QPen(alpha(C.accent, 110), 1.6, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r.adjusted(6, 6, -6, -6), self._radius - 6, self._radius - 6)
+            return
+
+        avail = r.bottom() - 12 - top
+        total = len(self._shelf)
+        visible = min(total, 5)
+        row_h = min(34.0, avail / visible)
+        x = r.left() + pad
+        w = r.width() - pad * 2
+        del_w = 22
+        size_w = 66
+        for i in range(visible):
+            item = self._shelf[i]
+            ry = top + i * row_h
+            row = QRectF(x, ry + 2, w, row_h - 4)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(C.chip)
+            p.drawRoundedRect(row, 8, 8)
+            # icon
+            isz = min(26.0, row.height() - 6)
+            ir = QRectF(row.left() + 6, row.center().y() - isz / 2, isz, isz)
+            icons.file(p, ir, _FILE_COLORS[item["type"]])
+            # tên (cắt nếu dài)
+            tx = ir.right() + 10
+            nmf = f(11.5, QFont.Weight.DemiBold)
+            p.setFont(nmf)
+            p.setPen(C.text)
+            name_max = row.right() - size_w - del_w - tx - 4
+            nm = fm(nmf).elidedText(item["name"], Qt.TextElideMode.ElideMiddle, int(max(20.0, name_max)))
+            p.drawText(QRectF(tx, row.top(), name_max + 6, row.height()), LC, nm)
+            # kích thước
+            p.setFont(f(9.5, QFont.Weight.Medium))
+            p.setPen(C.dim)
+            p.drawText(QRectF(row.right() - size_w - del_w, row.top(), size_w, row.height()), RC, item["size"])
+            # nút xoá
+            dx = row.right() - 11
+            dy = row.center().y()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(C.chip)
+            p.drawEllipse(QPointF(dx, dy), 9, 9)
+            p.setPen(C.dim)
+            p.setFont(f(12, QFont.Weight.DemiBold))
+            p.drawText(QRectF(dx - 9, dy - 9, 18, 18), Qt.AlignmentFlag.AlignCenter, "×")
+            self._hits[f"shelf_del:{i}"] = QRectF(dx - 12, dy - 12, 24, 24)
+            self._hits[f"shelf_open:{i}"] = QRectF(row.left(), row.top(), row.right() - del_w - 2 - row.left(), row.height())
+
+        if total > visible:
+            my = top + visible * row_h + 2
+            p.setFont(f(9.5, QFont.Weight.Medium))
+            p.setPen(C.dim)
+            p.drawText(QRectF(x, my, w, 16), LC, f"và {total - visible} file khác…")
+
     def _paint_notif(self, p: QPainter, r: QRectF):
         n = self._notif or {}
         app = n.get("app", "Ứng dụng")
@@ -1229,6 +1403,11 @@ class Island(QWidget):
         if self._vol_drag:
             self._set_vol_at(event.position().x())
             return
+        if self._chip_drag is not None:
+            delta = event.position().toPoint() - self._chip_drag["start"]
+            if delta.manhattanLength() > 5:
+                self._start_chip_drag()
+            return
         if self._press is not None:
             delta = event.globalPosition().toPoint() - self._press
             if not self._dragged and delta.manhattanLength() > 5:
@@ -1239,7 +1418,7 @@ class Island(QWidget):
                 self._cx = new_pos.x() + self.width() / 2
                 self._top = new_pos.y() + PAD
             return
-        if self._state == EXPANDED:
+        if self._state in (EXPANDED, SHELF):
             pos = event.position()
             key = None
             for name, rect in self._hits.items():
@@ -1262,6 +1441,17 @@ class Island(QWidget):
                 self._set_vol_at(event.position().x())
                 event.accept()
                 return
+            if hit and hit.startswith("shelf_open:"):
+                idx = int(hit.split(":")[1])
+                if 0 <= idx < len(self._shelf):
+                    self._chip_drag = {
+                        "path": self._shelf[idx]["path"],
+                        "index": idx,
+                        "start": event.position().toPoint(),
+                        "dragged": False,
+                    }
+                    event.accept()
+                    return
             self._press = event.globalPosition().toPoint()
             self._press_geo = self.geometry().topLeft()
             self._dragged = False
@@ -1273,6 +1463,12 @@ class Island(QWidget):
             return
         if self._vol_drag:
             self._vol_drag = False
+            return
+        if self._chip_drag is not None:
+            cd = self._chip_drag
+            self._chip_drag = None
+            if not cd.get("dragged"):
+                self._open_shelf_item(cd["index"])
             return
         if self._press is None:
             return
@@ -1288,19 +1484,28 @@ class Island(QWidget):
             return
         if hit == "vol":
             return
+        if hit == "shelf_close":
+            self._shelf_open = False
+            self.refresh()
+            return
+        if hit and hit.startswith("shelf_del:"):
+            self._remove_shelf(int(hit.split(":")[1]))
+            return
         if hit and self._media.get("has"):
             self.action_requested.emit(hit)
         elif self._state == EXPANDED:
             self._pinned = False
             self._suppressed = True
             self.refresh()
+        elif self._state == SHELF:
+            return
         else:
             self._pinned = True
             self._suppressed = False
             self.refresh()
 
     def _hit_at(self, pos) -> str | None:
-        if self._state != EXPANDED:
+        if self._state not in (EXPANDED, SHELF):
             return None
         for name, rect in self._hits.items():
             if rect.contains(pos):
@@ -1316,6 +1521,113 @@ class Island(QWidget):
         self._cx = clamp(self._cx, screen.left() + half, screen.right() - half)
         self._reposition()
 
+    # ----------------------------------------------------------------- kệ file
+    def _make_shelf_item(self, path: str) -> dict:
+        try:
+            sz = os.path.getsize(path)
+        except OSError:
+            sz = 0
+        return {
+            "path": path,
+            "name": os.path.basename(path),
+            "size": _fmt_size(sz),
+            "type": _file_type(path),
+        }
+
+    def _shelf_contains(self, path: str) -> bool:
+        return any(it["path"] == path for it in self._shelf)
+
+    def _open_shelf_item(self, index: int):
+        if 0 <= index < len(self._shelf):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._shelf[index]["path"]))
+
+    def _remove_shelf(self, index: int):
+        if 0 <= index < len(self._shelf):
+            del self._shelf[index]
+            self.update()
+            if not self._shelf:
+                self._shelf_open = False
+                self.refresh()
+
+    def _clear_shelf(self):
+        self._shelf.clear()
+        self._shelf_open = False
+        self.refresh()
+
+    def _shelf_drag_pixmap(self, name: str) -> QPixmap:
+        dpr = self.devicePixelRatioF() or 1.0
+        w, h = 180, 30
+        pm = QPixmap(round(w * dpr), round(h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pp.setBrush(QColor(18, 18, 24, 238))
+        pp.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
+        pp.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 8, 8)
+        pp.setPen(C.text)
+        pp.setFont(f(11, QFont.Weight.DemiBold))
+        nm = fm(f(11, QFont.Weight.DemiBold)).elidedText(name, Qt.TextElideMode.ElideMiddle, w - 24)
+        pp.drawText(QRectF(10, 0, w - 18, h), LC, nm)
+        pp.end()
+        return pm
+
+    def _start_chip_drag(self):
+        cd = self._chip_drag
+        if cd is None:
+            return
+        path = cd["path"]
+        if not os.path.exists(path):
+            self._chip_drag = None
+            return
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(path)])
+        drag = QDrag(self)
+        drag.setMimeData(md)
+        pm = self._shelf_drag_pixmap(os.path.basename(path))
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(pm.width() // 2, pm.height() // 2))
+        self._chip_drag = None
+        drag.exec(Qt.DropAction.CopyAction)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        md = event.mimeData()
+        if md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
+            self._dragging = True
+            self._shelf_open = True
+            self._hover = True
+            self._set_state(SHELF)
+            event.acceptProposedAction()
+            self.update()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if self._dragging:
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        self._dragging = False
+        if not self._shelf:
+            self._shelf_open = False
+        self.refresh()
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent):
+        md = event.mimeData()
+        added = False
+        for u in md.urls():
+            if u.isLocalFile():
+                path = u.toLocalFile()
+                if os.path.exists(path) and not self._shelf_contains(path):
+                    self._shelf.append(self._make_shelf_item(path))
+                    added = True
+        self._dragging = False
+        if added:
+            self._shelf_open = True
+        self.refresh()
+        event.acceptProposedAction()
+
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(
@@ -1327,6 +1639,11 @@ class Island(QWidget):
         )
         act_pin = menu.addAction("Bỏ ghim" if self._pinned else "Ghim mở rộng")
         act_pos = menu.addAction("Về giữa màn hình")
+        act_shelf = menu.addAction("Đóng kệ file" if self._shelf_open else "Mở kệ file")
+        if self._shelf:
+            act_clear = menu.addAction("Xoá hết trên kệ")
+        else:
+            act_clear = None
         menu.addSeparator()
         act_quit = menu.addAction("Thoát")
         chosen = menu.exec(event.globalPos())
@@ -1335,6 +1652,11 @@ class Island(QWidget):
             self.refresh()
         elif chosen == act_pos:
             self.reset_position()
+        elif chosen == act_shelf:
+            self._shelf_open = not self._shelf_open
+            self.refresh()
+        elif act_clear is not None and chosen == act_clear:
+            self._clear_shelf()
         elif chosen == act_quit:
             self.quit_requested.emit()
 

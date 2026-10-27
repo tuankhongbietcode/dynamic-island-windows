@@ -142,6 +142,14 @@ def main() -> int:
 
     act_expand.triggered.connect(toggle_expand)
 
+    act_shelf = QAction("Kệ file", menu)
+
+    def toggle_shelf():
+        island._shelf_open = not island._shelf_open
+        island.refresh()
+
+    act_shelf.triggered.connect(toggle_shelf)
+
     act_top = QAction("Luôn trên cùng", menu)
     act_top.setCheckable(True)
     act_top.setChecked(cfg.get("always_on_top", True))
@@ -181,6 +189,7 @@ def main() -> int:
     act_quit.triggered.connect(quit_app)
 
     menu.addAction(act_expand)
+    menu.addAction(act_shelf)
     menu.addAction(act_top)
     menu.addAction(act_static)
     menu.addAction(act_autostatic)

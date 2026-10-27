@@ -11,9 +11,9 @@ Toàn bộ code chạy trên máy bạn — không tải exe lạ, không gọi 
 |---|---|
 | ![mở rộng](preview/expanded.png) | ![đồng hồ](preview/expanded_idle.png) |
 
-| Thông báo | |
+| Thông báo | Kệ file (kéo-thả) |
 |---|---|
-| ![thông báo](preview/notif.png) | |
+| ![thông báo](preview/notif.png) | ![kệ file](preview/shelf.png) |
 
 ## Thiết kế
 
@@ -49,8 +49,13 @@ Muốn tự khởi động cùng Windows: chuột phải lên island → **Khở
 | Đưa chuột lên island | Bung ra: nhạc + thông số CPU/RAM/NET/PIN |
 | Bấm chuột trái | Ghim mở rộng (bấm lần nữa để thu lại) |
 | Kéo chuột | Di chuyển island, tự bám lại mép trên |
-| Chuột phải | Menu: ghim, về giữa màn hình, gửi thông báo thử, thoát |
-| Icon ở khay hệ thống | Menu đầy đủ: luôn trên cùng, chế độ tĩnh, tự động tĩnh, khởi động cùng Windows |
+| Trượt/click lên thanh âm lượng | Chỉnh âm lượng hệ thống; click icon loa để tắt/bật tiếng |
+| Kéo file vào island | Lưu tạm vào kệ file (SHELF) |
+| Click file trên kệ | Mở file bằng ứng dụng mặc định |
+| Kéo file trên kệ ra ngoài | Đẩy file sang app khác (Explorer, chat…) |
+| Click dấu × trên kệ | Xoá file khỏi kệ |
+| Chuột phải | Menu: ghim, kệ file, về giữa màn hình, gửi thông báo thử, thoát |
+| Icon ở khay hệ thống | Menu đầy đủ: luôn trên cùng, chế độ tĩnh, tự động tĩnh, kệ file, khởi động cùng Windows |
 
 Khi thu nhỏ:
 
@@ -90,6 +95,13 @@ Nếu app đó không hiện trong island, kiểm tra theo thứ tự:
   tiến trình, thời lượng, ảnh bìa, và **màu nhấn lấy từ ảnh bìa**.
 - **Thông báo**: đọc toast của Windows qua `UserNotificationListener`.
 - **Thông số**: CPU, RAM, tốc độ mạng xuống, phần trăm pin (kèm tia sét khi đang sạc).
+- **Âm lượng hệ thống**: thanh trượt trong panel mở rộng, kéo để chỉnh master volume (qua
+  `pycaw` / Core Audio), click icon loa để tắt/bật tiếng. Tự cập nhật nếu bạn chỉnh âm lượng
+  ở nơi khác.
+- **Kệ file kéo-thả (SHELF)**: kéo file từ Explorer hay bất kỳ đâu thả vào island để lưu tạm;
+  click để mở bằng app mặc định, kéo ngược ra để đẩy file sang app khác, dấu × để xoá. Số lượng
+  file đang lưu hiện thành huy hiệu nhỏ trên island khi thu gọn. Mở/đóng kệ qua chuột phải hoặc
+  icon khay hệ thống.
 - **Đồng hồ**: giờ ở trạng thái thu gọn, đồng hồ lớn + thứ/ngày khi mở rộng mà không có nhạc.
 
 ## Cấu hình
