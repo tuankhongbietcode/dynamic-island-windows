@@ -70,6 +70,10 @@ SIZES = {
     SHELF: (496, 208, 44.0),
 }
 
+# (bước nhảy tick khi hover, bước nhảy tick khi rảnh) theo bậc máy nhanh/vừa/chậm.
+# Tick 16 ms nên bước 1 = 62 fps, 2 = 31 fps, 3 = 21 fps, 4 = 15 fps.
+_FPS_TIERS = ((1, 2), (2, 3), (3, 4))
+
 # Màu theo loại file (cho icon kệ)
 _FILE_COLORS = {
     "img": QColor(255, 106, 148),
@@ -287,6 +291,15 @@ class Island(QWidget):
         self._chrome_key = None
         self._chrome_px = QPixmap()
 
+        # Bìa nhạc đã bo góc + sheen + viền: vẽ 1 lần, mỗi khung chỉ blit.
+        self._art_seq = 0
+        self._art_tile_key = None
+        self._art_tile = QPixmap()
+
+        # Thời gian vẽ trung bình (ms/khung) — dùng để tự chọn mức fps phù hợp máy.
+        self._paint_ms = 0.0
+        self._tier = 0
+
         # âm lượng hệ thống
         self._volume = Volume()
         self._vol_level, self._vol_muted = self._volume.refresh()
@@ -402,6 +415,7 @@ class Island(QWidget):
             art = payload.get("art") or b""
             if art and art != getattr(self, "_art_bytes", b""):
                 self._art_bytes = art
+                self._art_seq += 1
                 img = QImage()
                 if img.loadFromData(art):
                     side = min(img.width(), img.height())
@@ -427,6 +441,8 @@ class Island(QWidget):
                     )
                     self._accent = self._accent_from(img)
         else:
+            if self._art_bytes:
+                self._art_seq += 1
             self._art_bytes = b""
             self._art_px = QPixmap()
             self._art_big = QPixmap()
@@ -639,6 +655,19 @@ class Island(QWidget):
         self._vol_level, self._vol_muted = self._volume.refresh()
         self.update()
 
+    def _set_tick_rate(self, interval: int):
+        """Đổi nhịp tick. Chỉ đổi khi thật sự khác để không reset timer liên tục."""
+        if interval == self._ui.interval():
+            return
+        was = self._ui.isActive()
+        self._ui.stop()
+        self._ui.setTimerType(
+            Qt.TimerType.PreciseTimer if interval <= 20 else Qt.TimerType.CoarseTimer
+        )
+        self._ui.setInterval(interval)
+        if was:
+            self._ui.start()
+
     def _tick_ui(self):
         self._tick_n += 1
         now = time.monotonic()
@@ -664,17 +693,59 @@ class Island(QWidget):
 
         blink_on = self._eyes.blink > 0.01 or prev_blink > 0.01
 
+        # Nhịp tick thích ứng: mỗi khung vẽ của cửa sổ trong suốt tốn ~4-10ms
+        # (Windows phải upload lại toàn bộ mặt cửa sổ), nên khi không có gì
+        # chuyển động thì hạ xuống rất thấp để không đốt pin vô ích.
+        busy = bool(
+            playing
+            or self._hover
+            or self._marq
+            or blink_on
+            or self._dragging
+            or self._vol_drag
+            or self._notif_active()
+            or self._morph.state() == QVariantAnimation.State.Running
+            or self._fade.state() == QVariantAnimation.State.Running
+        )
+        if busy:
+            self._set_tick_rate(16)      # 62 Hz
+        elif frozen:
+            self._set_tick_rate(400)     # đóng băng: gần như không làm gì
+        else:
+            self._set_tick_rate(66)      # rảnh ở desktop: còn mắt chớp
+
+        # Ba bậc thích ứng theo thời gian vẽ thật của máy:
+        #   nhanh -> 60/30 fps, vừa -> 30/20 fps, chậm -> 20/15 fps.
+        # Có trễ giữa hai bậc: hạ fps thì khung vẽ lại nhanh lên, nếu không có trễ
+        # thì nó nhảy qua nhảy lại giữa hai bậc liên tục.
+        ms = self._paint_ms
+        tier = self._tier
+        if tier == 0 and ms > 5.0:
+            tier = 1
+        elif tier == 1:
+            if ms > 8.0:
+                tier = 2
+            elif ms < 4.0:
+                tier = 0
+        elif tier == 2 and ms < 6.5:
+            tier = 1
+        self._tier = tier
+        hover_step, idle_step = _FPS_TIERS[tier]
+
         if playing:
-            # 60 fps khi đang rê chuột vào đảo (lúc cần mượt nhất),
-            # 30 fps khi chỉ liếc nhìn hoặc đang ở app khác.
             if self._hover:
-                self.update()
-            elif self._tick_n % 2 == 0:
+                step = hover_step
+            elif frozen:
+                step = 4                         # 15 fps: vẫn "thở" khi ở app khác
+            else:
+                step = idle_step
+            if self._tick_n % step == 0:
                 self.update()
             return
         if self._hover:
             if self._marq or blink_on:
-                self.update()
+                if self._tick_n % hover_step == 0:
+                    self.update()
             elif abs(dx - self._eye_dx) > 1.2:
                 # mắt nhìn theo con trỏ: chỉ vẽ khi con trỏ dịch đủ xa
                 self._eye_dx = dx
@@ -769,6 +840,7 @@ class Island(QWidget):
         return pm
 
     def paintEvent(self, _event):
+        t0 = time.perf_counter()
         p = QPainter(self)
         p.setRenderHints(
             QPainter.RenderHint.Antialiasing
@@ -778,10 +850,11 @@ class Island(QWidget):
         pill = self._pill_rect()
         p.drawPixmap(QPointF(0.0, 0.0), self._chrome())
 
-        path = pill_path(pill, self._radius)
-
         p.save()
-        p.setClipPath(path)
+        # Clip chữ nhật thay vì clip theo path cong: path clip bật chế độ khử
+        # răng cưa từng pixel, đắt gấp nhiều lần. Nội dung đều nằm trong lòng
+        # viên đảo nên nhìn không khác gì; phần bo góc đã do nền đảm nhiệm.
+        p.setClipRect(pill)
         p.setOpacity(clamp(self._content, 0.0, 1.0))
         p.translate(0.0, self._slide)
         if self._state != EXPANDED:
@@ -821,6 +894,11 @@ class Island(QWidget):
             mf = fm(f(9, QFont.Weight.DemiBold))
             p.setFont(f(9, QFont.Weight.DemiBold))
             p.drawText(QRectF(cx - 8.5, cy - 8.5, 17, 17), Qt.AlignmentFlag.AlignCenter, label)
+
+        p.end()
+        # Trung bình trượt thời gian vẽ: máy yếu sẽ tự hạ mức fps thay vì giật.
+        ms = (time.perf_counter() - t0) * 1000.0
+        self._paint_ms = self._paint_ms * 0.90 + ms * 0.10
 
     def _render_shadow(self, w: float, h: float, r: float) -> QPixmap:
         """Vẽ bóng đổ blur cho một kích thước (gọi một lần cho mỗi trạng thái)."""
@@ -1009,36 +1087,71 @@ class Island(QWidget):
         p.setBrush(QBrush(g))
         p.drawEllipse(art.center(), rad, rad)
 
-    def _paint_art(self, p: QPainter, rect: QRectF, radius: float, small: bool = False):
+    def _art_tile_for(self, rect: QRectF, radius: float, small: bool) -> QPixmap:
+        """Bìa đã bo góc + sheen + viền, render 1 lần rồi cache.
+
+        Trước đây mỗi khung phải dựng QPainterPath, setClipPath, tô gradient
+        sheen và stroke viền — tốn nhất trong panel mở rộng. Giờ chỉ còn 1 blit.
+        """
+        key = (
+            self._art_seq,
+            small,
+            round(rect.width(), 1),
+            round(rect.height(), 1),
+            round(radius, 1),
+        )
+        if key == self._art_tile_key:
+            return self._art_tile
+
+        dpr = self.devicePixelRatioF() or 1.0
+        w, h = rect.width(), rect.height()
+        pm = QPixmap(max(1, round(w * dpr)), max(1, round(h * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        qp = QPainter(pm)
+        qp.setRenderHints(
+            QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+        )
+        local = QRectF(0.0, 0.0, w, h)
         path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        p.save()
-        p.setClipPath(path)
+        path.addRoundedRect(local, radius, radius)
+        qp.setClipPath(path)
+
         px = self._art_small if small else self._art_big
         if not px.isNull():
-            p.drawPixmap(rect, px, QRectF(px.rect()))
+            qp.drawPixmap(local, px, QRectF(px.rect()))
         else:
-            g = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            g = QLinearGradient(local.topLeft(), local.bottomRight())
             g.setColorAt(0.0, mix(QColor(22, 22, 28), self._accent, 0.55))
             g.setColorAt(1.0, mix(QColor(6, 6, 9), self._accent, 0.22))
-            p.fillRect(rect, g)
-            inset = rect.adjusted(
-                rect.width() * 0.28,
-                rect.height() * 0.28,
-                -rect.width() * 0.28,
-                -rect.height() * 0.28,
+            qp.fillRect(local, g)
+            inset = local.adjusted(
+                w * 0.28,
+                h * 0.28,
+                -w * 0.28,
+                -h * 0.28,
             )
-            icons.note(p, inset, alpha(QColor(255, 255, 255), 205))
+            icons.note(qp, inset, alpha(QColor(255, 255, 255), 205))
 
-        sheen = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        sheen = QLinearGradient(local.topLeft(), local.bottomLeft())
         sheen.setColorAt(0.0, QColor(255, 255, 255, 16))
         sheen.setColorAt(0.34, QColor(255, 255, 255, 0))
-        p.fillRect(rect, sheen)
-        p.restore()
+        qp.fillRect(local, sheen)
 
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(alpha(QColor(255, 255, 255), 38), 1.0))
-        p.drawPath(path)
+        qp.setClipping(False)
+        qp.setBrush(Qt.BrushStyle.NoBrush)
+        qp.setPen(QPen(alpha(QColor(255, 255, 255), 38), 1.0))
+        qp.drawPath(path)
+        qp.end()
+
+        self._art_tile_key = key
+        self._art_tile = pm
+        return pm
+
+    def _paint_art(self, p: QPainter, rect: QRectF, radius: float, small: bool = False):
+        tile = self._art_tile_for(rect, radius, small)
+        p.drawPixmap(rect, tile, QRectF(0.0, 0.0, rect.width(), rect.height()))
 
     def _paint_expanded(self, p: QPainter, r: QRectF):
         has = self._media.get("has")
@@ -1480,6 +1593,7 @@ class Island(QWidget):
 
     # -------------------------------------------------------------- tương tác
     def enterEvent(self, _event):
+        self._set_tick_rate(16)   # vào chuột là chạy full nhịp ngay, không chờ tick
         self._evt_hover = True
         self._hover = True
         self._suppressed = False

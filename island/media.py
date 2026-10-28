@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import traceback
 
 from PySide6.QtCore import QThread, Signal
 
-from .debug import dbg
+from .debug import dbg, log_exc
 
 try:
     from winrt.windows.media.control import (
@@ -48,7 +47,7 @@ class MediaWorker(QThread):
         try:
             loop.run_until_complete(self._main())
         except Exception:
-            traceback.print_exc()
+            log_exc("media")
         finally:
             try:
                 loop.close()

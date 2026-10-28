@@ -23,6 +23,30 @@ CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "D
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 
+def ensure_streams():
+    """Chạy bằng pythonw (không console) thì stdout/stderr có thể là None.
+
+    Mọi `print()` / traceback trong thread sẽ ném AttributeError và giết thread
+    đó. Ở đây ta trỏ chúng vào file log để vừa an toàn vừa có log khi cần gỡ.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fh = open(
+            os.path.join(CONFIG_DIR, "island.log"),
+            "a",
+            encoding="utf-8",
+            buffering=1,
+        )
+    except Exception:
+        fh = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = fh
+    if sys.stderr is None:
+        sys.stderr = fh
+
+
 def load_config() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -86,6 +110,7 @@ def set_startup(enabled: bool):
 
 
 def main() -> int:
+    ensure_streams()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Dynamic Island")
@@ -106,7 +131,13 @@ def main() -> int:
     monitor.updated.connect(island.set_stats)
     media.changed.connect(island.set_media)
     notifier.arrived.connect(island.push_notification)
-    notifier.status.connect(lambda s: print("[notify]", s, flush=True))
+    def on_notify_status(status: str):
+        try:
+            print("[notify]", status, flush=True)
+        except Exception:
+            pass
+
+    notifier.status.connect(on_notify_status)
     island.action_requested.connect(media.send)
 
     media.start()

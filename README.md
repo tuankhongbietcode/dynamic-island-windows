@@ -25,8 +25,11 @@ sáng 1px, và **đôi mắt linh vật** — thứ làm nó sống hơn hẳn m
 - **Nền**: đen `#000` pha chút xanh ở đỉnh, cộng quầng sáng rất nhẹ lấy màu từ bìa album.
 - **Chữ**: tên bài dài tự chạy ngang, mờ dần ở mép phải thay vì cắt cụt.
 - **Bung/thu**: 360 ms `OutExpo` cho kích thước; nội dung trượt lên ~7 px và mờ dần vào.
-- **Sóng nhạc**: 4 thanh mảnh, màu nhấn đổi theo bìa đĩa.
-- **Nút điều khiển**: play tròn 42 px viền màu nhấn, sáng lên khi rê chuột; prev/next có quầng tròn.
+- **Sóng nhạc**: 5 thanh mảnh, hai tần số lệch pha nên nhịp không đều như thật; màu nhấn lấy từ bìa đĩa.
+- **Nút điều khiển**: play tròn trắng đặc + glyph đen (kiểu Apple Music), có nhịp lan toả khi đang phát;
+  prev/next có quầng tròn.
+- **Khi đang phát nhạc**: vệt sáng chạy dọc mép trên, quầng màu nhấn sau bìa "thở" chậm, chấm tiến
+  trình nhấp nháy. Tất cả chạy theo thời gian thực (dt) nên tốc độ không đổi dù fps dao động.
 
 ## Cần gì
 
@@ -35,12 +38,18 @@ sáng 1px, và **đôi mắt linh vật** — thứ làm nó sống hơn hẳn m
 
 ## Cài
 
-1. Chạy `setup.bat` — tạo `.venv` và cài thư viện (PySide6, psutil, winrt).
-2. Chạy `start-island.vbs` — island hiện ra, không có cửa sổ đen.
+```
+git clone https://github.com/tuankhongbietcode/dynamic-island-windows
+cd dynamic-island-windows
+setup.bat
+```
 
-Nếu bạn đã có sẵn một môi trường Python khác và không muốn tạo `.venv`, tạo file
+`setup.bat` tạo `.venv`, cài thư viện, kiểm tra lại rồi **tự khởi động island** luôn.
+Lần sau chỉ cần bấm `start-island.vbs` (không có cửa sổ đen nào hiện ra).
+
+Nếu bạn đã có sẵn môi trường Python khác và không muốn tạo `.venv`, tạo file
 `python-path.txt` ở thư mục gốc, dòng đầu ghi đường dẫn đầy đủ tới `pythonw.exe`.
-`start-island.vbs` sẽ dùng nó khi không thấy `.venv`.
+`start-island.vbs` tự dò theo thứ tự: `.venv` → `python-path.txt` → `py -3` → `pythonw` trong PATH.
 
 Muốn tự khởi động cùng Windows: chuột phải lên island → **Khởi động cùng Windows** (hoặc bật trong menu tray).
 
@@ -71,7 +80,32 @@ Nếu đang mở rộng thì chỉ hiện chấm đỏ ở góc, không cắt ng
 
 - **Tự động tĩnh khi dùng app khác** (mặc định BẬT): đảo phát hiện khi một cửa sổ ứng dụng thật chiếm foreground → tự động đứng yên. Quay lại desktop hoặc rê chuột lên đảo → hoạt cảnh tiếp tục.
 - **Chế độ tĩnh thủ công** (mặc định TẮT): bật trong khay hệ thống để đảo luôn đứng yên, chỉ vẽ lại khi phút đổi hoặc bạn rê chuột vào.
-- Nhịp vẽ tự thích ứng: 30 fps khi đang chớp mắt / chạy chữ / rê chuột, 15 fps khi chỉ có sóng nhạc, ~1 fps khi rảnh hoặc đông cứng.
+
+Nhịp vẽ **tự thích ứng theo cả trạng thái lẫn tốc độ máy** — đây là phần quan trọng nhất
+để máy yếu vẫn mượt:
+
+| Tình huống | Nhịp | Ghi chú |
+|---|---|---|
+| Rê chuột vào đảo | 60 fps | máy chậm tự hạ còn 30 fps |
+| Đang phát nhạc, đảo đang hiện | 30 fps | 20 fps nếu máy chậm |
+| Đang phát nhạc nhưng bạn ở app khác | 15 fps | vẫn "thở" nhẹ, không đứng hình |
+| Rảnh ở desktop (không nhạc) | 15 fps khi cần, còn lại ~2 fps | đủ để mắt chớp |
+| Đang làm việc ở app khác, không nhạc | ~2,5 fps | gần như không tốn CPU |
+
+Máy nhanh hay chậm được phát hiện bằng cách đo thời gian vẽ thật của từng khung
+(trung bình trượt). Ngưỡng: khung dưới 6 ms mới chạy 60 fps.
+
+Đo trên máy tham chiếu, tính **% của một nhân CPU**, đã gồm cả các thread nền
+(nhạc, thông báo, thông số):
+
+| Trạng thái | Trước tối ưu | Sau tối ưu |
+|---|---|---|
+| Rảnh ở desktop, không nhạc | 7,2 % | **1,6 %** |
+| Đang phát nhạc, bạn làm việc ở app khác | 27 % | **11,7 %** |
+| Rê chuột, panel mở rộng | 45 % | **31 %** |
+
+Máy khác sẽ ra số khác, nhưng cơ chế thích ứng tự chọn mức fps vừa sức: máy càng chậm
+càng hạ nhịp, nên không bao giờ rơi vào cảnh cố 60 fps rồi giật.
 
 ## Thông báo Teams / Outlook / mail
 
@@ -121,13 +155,30 @@ Xoá file này để về mặc định.
   (bo góc, gradient, bóng đổ blur, icon vector) nên không có file ảnh nào.
 - Hoạt cảnh bung/thu là `QVariantAnimation` nội suy đồng thời kích thước và bán kính góc
   (360 ms, OutExpo).
-- Nền + bóng đổ được render một lần rồi cache thành `QPixmap` theo kích thước/màu nhấn; mỗi
-  khung hình chỉ blit lại, nên lúc phát nhạc CPU ~1–2% (một nhân).
-- Nhịp vẽ tự thích ứng: 30 fps khi đang chớp mắt / chạy chữ / rê chuột, 15 fps khi chỉ có sóng
-  nhạc, 1 fps khi rảnh.
+- Ba lớp tĩnh đều được cache thành `QPixmap` và chỉ blit lại mỗi khung: **nền + bóng đổ**,
+  **bìa nhạc đã bo góc + sheen + viền** (`_art_tile_for`), và **font/metrics**. Nhờ vậy phần vẽ
+  thật chỉ còn ~2 ms/khung cho panel mở rộng.
+- Clip nội dung dùng `setClipRect` chứ không dùng clip theo `QPainterPath` cong — clip path bật
+  khử răng cưa từng pixel, đắt hơn nhiều lần mà nhìn không khác gì.
+- **Chi phí thật nằm ở Windows, không phải ở code vẽ**: mỗi khung, cửa sổ trong suốt
+  (`WA_TranslucentBackground`) phải upload lại toàn bộ mặt cửa sổ, tốn ~4–10 ms tuỳ diện tích.
+  Vì thế cách tối ưu hiệu quả nhất là **vẽ ít khung hơn khi không cần**, chứ không phải vẽ nhanh hơn.
+- **Nhịp tick thích ứng** (`_set_tick_rate`): 16 ms `PreciseTimer` khi có hoạt cảnh, 66 ms khi rảnh
+  ở desktop, 400 ms `CoarseTimer` khi đông cứng. Timer 16 ms luôn bật sẽ buộc Windows giữ độ phân
+  giải timer ở 1 ms và ngăn CPU vào trạng thái nghỉ — đó là lý do bản cũ tốn pin vô ích.
+- **Nhịp quét thông báo tự điều chỉnh theo chi phí đo được.** Windows không cho app chạy trực tiếp
+  đăng ký event `add_notification_changed` (trả `Element not found`), nên phải quét
+  `get_notifications_async`. Một lần quét tốn 30 ms (ít thông báo) tới 600 ms (rất nhiều thông báo),
+  và chi phí đó tỉ lệ với số thông báo đang có trong Action Center. Vì vậy code đo thời gian từng
+  lần quét rồi đặt nhịp = `thời gian quét / 35`, kẹp trong 2–12 giây — tức phần này luôn chỉ dùng
+  ~3,5 % một nhân, bất kể người dùng giữ bao nhiêu thông báo. Nếu Windows có bắn event (một số bản
+  có hỗ trợ) thì tự chuyển sang chế độ event và gần như không tốn gì.
+- **Không để thread nền giết UI**: `pythonw` không có `stdout/stderr`, nên mọi chỗ bắt lỗi trong
+  worker đi qua `debug.log_exc()` (không bao giờ tự ném lỗi). `main.py` còn trỏ `stdout/stderr`
+  vào `%APPDATA%\DynamicIsland\island.log` khi chạy không console — vừa an toàn vừa có log để gỡ.
 - **Chế độ tĩnh / tối ưu foreground**: theo dõi cửa sổ đang chiếm foreground qua `GetClassNameW`
   (mỗi 400 ms). Nếu là ứng dụng thật (không phải desktop/traybar) → đông cứng, chỉ vẽ lại khi
-  phút đổi hoặc rê chuột vào. Giúp CPU gần như 0% khi đang làm việc ở app khác.
+  phút đổi hoặc rê chuột vào.
 - `media.py` và `notify.py` chạy trong `QThread` riêng, mỗi thread có asyncio loop cho WinRT;
   giao tiếp với UI qua `Signal`.
 - Chạy `python main.py` để xem log; `python snapshot.py` để xuất ảnh từng trạng thái vào `preview/`.
