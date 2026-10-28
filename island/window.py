@@ -273,6 +273,7 @@ class Island(QWidget):
         self._hover_ctrl: str | None = None
         self._hits: dict[str, QRectF] = {}
         self._eq = 0.0
+        self._pulse = 0.0
         self._tick_n = 0
 
         self._press = None
@@ -641,9 +642,13 @@ class Island(QWidget):
         prev_blink = self._eyes.blink
         frozen = (self._static or (self._auto_static and self._other_fg)) and not self._hover
 
+        # Nhạc đang phát thì luôn giữ nhịp: sóng, quầng sáng, nhịp nút play.
+        # Kể cả lúc "đóng băng" vì app khác chiếm focus, chỉ hạ tần số vẽ.
+        if playing:
+            self._eq += 0.34
+            self._pulse += 0.055
+
         if not frozen:
-            if playing:
-                self._eq += 0.34
             dx = 0.0
             if self._hover:
                 dx = QCursor.pos().x() - self.mapToGlobal(self.rect().center()).x()
@@ -661,9 +666,9 @@ class Island(QWidget):
         if not frozen and (self._marq or blink_on):
             self.update()
             return
-        # 15 fps: sóng nhạc
-        if playing and not frozen:
-            if self._tick_n % 2 == 0:
+        if playing:
+            # 15 fps khi đảo đang "rảnh", 7.5 fps khi đang bị app khác chiếm focus
+            if self._tick_n % (2 if not frozen else 4) == 0:
                 self.update()
             return
         # rảnh: chỉ vẽ lại khi phút đổi — gần như 0% CPU
@@ -781,6 +786,9 @@ class Island(QWidget):
             self._paint_notif(p, pill)
         p.restore()
 
+        if self._media.get("has") and self._media.get("playing"):
+            self._paint_rim_sweep(p, pill)
+
         if self._badge:
             cx, cy = pill.right() - 13, pill.top() + 13
             p.setPen(Qt.PenStyle.NoPen)
@@ -881,6 +889,21 @@ class Island(QWidget):
         p.setBrush(rgba(255, 255, 255, 38))
         p.drawEllipse(QPointF(cx + rr * 0.30, cy + rr * 0.34), 0.72 * scale, 0.72 * scale)
 
+    def _paint_rim_sweep(self, p: QPainter, r: QRectF):
+        """Vệt sáng chạy dọc mép trên khi nhạc đang phát (nhìn như có điện)."""
+        t = 0.5 + 0.5 * math.sin(self._pulse * 1.15)
+        cx = lerp(r.left() - 40.0, r.right() + 40.0, t)
+        g = QLinearGradient(cx - 78.0, 0.0, cx + 78.0, 0.0)
+        g.setColorAt(0.0, rgba(255, 255, 255, 0))
+        g.setColorAt(0.5, rgba(255, 255, 255, 78))
+        g.setColorAt(1.0, rgba(255, 255, 255, 0))
+        p.save()
+        p.setClipRect(QRectF(r.left() - 2.0, r.top() - 1.5, r.width() + 4.0, 13.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QBrush(g), 1.3))
+        p.drawPath(pill_path(r, self._radius))
+        p.restore()
+
     def _paint_idle(self, p: QPainter, r: QRectF):
         clock = time.strftime("%H:%M")
         date = _vn_short()
@@ -911,15 +934,16 @@ class Island(QWidget):
 
     def _paint_compact(self, p: QPainter, r: QRectF):
         art = QRectF(r.left() + 7, r.top() + 7, 28, 28)
+        self._paint_art_glow(p, art)
         self._paint_art(p, art, 9.5, small=True)
 
         cy = r.center().y()
         x = art.right() + 9
         if self._media.get("playing"):
-            self._paint_eq(p, QRectF(x, cy - 6.5, 14, 13))
+            self._paint_eq(p, QRectF(x, cy - 7.0, 18, 14))
         else:
             icons.pause(p, QRectF(x + 2, cy - 5, 9, 10), C.mute)
-        x += 20
+        x += 24
 
         eye_w = 24.0
         tf = f(11.5, QFont.Weight.DemiBold)
@@ -939,15 +963,33 @@ class Island(QWidget):
         )
 
     def _paint_eq(self, p: QPainter, r: QRectF):
+        """Sóng nhạc 5 vạch; hai tần số lệch pha để nhịp không đều như thật."""
         p.setPen(Qt.PenStyle.NoPen)
-        n, bw, gap = 4, 2.4, 2.3
+        n, bw = 5, 2.2
+        gap = (r.width() - n * bw) / (n - 1)
         for i in range(n):
-            amp = 0.30 + 0.70 * (0.5 + 0.5 * math.sin(self._eq + i * 1.55))
-            hgt = max(2.2, r.height() * amp)
+            a = 0.5 + 0.5 * math.sin(self._eq * 1.00 + i * 1.37)
+            b = 0.5 + 0.5 * math.sin(self._eq * 0.63 + i * 2.11 + 1.2)
+            amp = 0.20 + 0.80 * (a * 0.62 + b * 0.38)
+            hgt = max(2.4, r.height() * amp)
             x = r.left() + i * (bw + gap)
             y = r.center().y() - hgt / 2.0
-            p.setBrush(alpha(self._accent, 130 + i * 34))
+            p.setBrush(alpha(self._accent, 120 + int(120 * amp)))
             p.drawRoundedRect(QRectF(x, y, bw, hgt), bw / 2, bw / 2)
+
+    def _paint_art_glow(self, p: QPainter, art: QRectF):
+        """Quầng accent "thở" phía sau bìa khi nhạc đang chạy."""
+        if not self._media.get("playing"):
+            return
+        k = 0.5 + 0.5 * math.sin(self._pulse)
+        rad = art.width() * (0.95 + 0.14 * k)
+        g = QRadialGradient(art.center(), rad)
+        g.setColorAt(0.0, alpha(self._accent, int(32 + 28 * k)))
+        g.setColorAt(0.60, alpha(self._accent, int(10 + 12 * k)))
+        g.setColorAt(1.0, alpha(self._accent, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(g))
+        p.drawEllipse(art.center(), rad, rad)
 
     def _paint_art(self, p: QPainter, rect: QRectF, radius: float, small: bool = False):
         path = QPainterPath()
@@ -991,6 +1033,7 @@ class Island(QWidget):
                 self._eye_color(),
             )
             art = QRectF(r.left() + EXP_ART_X, r.top() + EXP_ART_Y, EXP_ART, EXP_ART)
+            self._paint_art_glow(p, art)
             self._paint_art(p, art, 20)
             self._paint_media(p, r, r.left() + EXP_TEXT_X, EXP_TEXT_W)
         else:
@@ -1099,6 +1142,10 @@ class Island(QWidget):
 
             # chấm nhỏ ở đầu phát; ẩn khi chưa phát để không có chấm lạc ở mép trái
             knob_x = x + w * frac
+            if self._media.get("playing"):
+                k = 0.5 + 0.5 * math.sin(self._pulse * 1.7)
+                p.setBrush(alpha(self._accent, int(36 + 34 * k)))
+                p.drawEllipse(QPointF(knob_x, track_y + th / 2), 5.6, 5.6)
             p.setBrush(QColor(255, 255, 255))
             p.drawEllipse(QPointF(knob_x, track_y + th / 2), 2.6, 2.6)
 
@@ -1129,6 +1176,13 @@ class Island(QWidget):
             icons.pause(p, QRectF(cx - 5.0, cy - 7.0, 10.0, 14.0), QColor(9, 9, 12))
         else:
             icons.play(p, QRectF(cx - 4.0, cy - 7.6, 12.0, 15.0), QColor(9, 9, 12))
+
+        # nhịp "thở" lan ra từ nút play khi đang phát
+        if playing:
+            ph = (self._pulse * 0.42) % 1.0
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(rgba(255, 255, 255, int(66 * (1.0 - ph))), 1.2))
+            p.drawEllipse(QPointF(cx, cy), 21.0 + ph * 11.0, 21.0 + ph * 11.0)
 
         for name, ix, icon_fn in (
             ("prev", cx - 78 + 17, icons.prev),

@@ -105,6 +105,9 @@ def main():
     island.set_media(media)
     island._vol_level = 0.62
     island._vol_muted = False
+    # đặt pha hoạt cảnh vào giữa để ảnh chụp thấy được sóng / quầng sáng / vệt viền
+    island._pulse = 2.73
+    island._eq = 2.2
 
     shots = []
 
