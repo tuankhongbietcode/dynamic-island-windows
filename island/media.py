@@ -67,7 +67,7 @@ class MediaWorker(QThread):
             except Exception:
                 self._manager = None
                 self.changed.emit({"has": False})
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(1.0)
 
     async def _poll(self) -> dict:
         session = self._manager.get_current_session()

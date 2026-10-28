@@ -26,7 +26,17 @@ class NotifyWorker(QThread):
         super().__init__(parent)
         self._running = True
         self._seen: deque[int] = deque(maxlen=400)
+        self._seen_set: set[int] = set()
         self._started = dt.datetime.now(dt.timezone.utc)
+
+    def _remember(self, nid: int):
+        """Ghi nhớ id vừa thấy — set để tra O(1), deque để giới hạn bộ nhớ."""
+        if nid in self._seen_set:
+            return
+        if len(self._seen) == self._seen.maxlen:
+            self._seen_set.discard(self._seen[0])
+        self._seen.append(nid)
+        self._seen_set.add(nid)
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -63,7 +73,7 @@ class NotifyWorker(QThread):
         try:
             existing = await listener.get_notifications_async(NotificationKinds.TOAST)
             for n in existing:
-                self._seen.append(n.id)
+                self._remember(n.id)
         except Exception:
             pass
 
@@ -72,9 +82,9 @@ class NotifyWorker(QThread):
                 items = await listener.get_notifications_async(NotificationKinds.TOAST)
                 fresh = []
                 for n in items:
-                    if n.id in self._seen:
+                    if n.id in self._seen_set:
                         continue
-                    self._seen.append(n.id)
+                    self._remember(n.id)
                     try:
                         if n.creation_time < self._started:
                             continue
@@ -87,7 +97,10 @@ class NotifyWorker(QThread):
                     self.arrived.emit(payload)
             except Exception:
                 pass
-            await asyncio.sleep(1.5)
+            # Quét toàn bộ toast rất đắt (38 thông báo ~50-110 ms CPU mỗi lần).
+            # 1.5s làm tốn ~14% một core và gây khựng định kỳ; 3s là đủ nhanh
+            # vì toast của Windows hiển thị ~5s.
+            await asyncio.sleep(3.0)
 
     @staticmethod
     def _parse(n) -> dict | None:
