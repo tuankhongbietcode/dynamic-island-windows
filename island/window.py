@@ -275,6 +275,8 @@ class Island(QWidget):
         self._eq = 0.0
         self._pulse = 0.0
         self._tick_n = 0
+        self._last_tick = time.monotonic()
+        self._eye_dx = 0.0
 
         self._press = None
         self._press_geo = None
@@ -312,7 +314,8 @@ class Island(QWidget):
         self._fade.valueChanged.connect(self._on_fade)
 
         self._ui = QTimer(self)
-        self._ui.setInterval(33)
+        self._ui.setTimerType(Qt.TimerType.PreciseTimer)
+        self._ui.setInterval(16)
         self._ui.timeout.connect(self._tick_ui)
         self._ui.start()
 
@@ -638,6 +641,11 @@ class Island(QWidget):
 
     def _tick_ui(self):
         self._tick_n += 1
+        now = time.monotonic()
+        # dt thật (kẹp lại phòng khi máy sleep): tốc độ hoạt cảnh không phụ thuộc fps
+        dt = min(0.12, max(0.0, now - self._last_tick))
+        self._last_tick = now
+
         playing = bool(self._media.get("has") and self._media.get("playing"))
         prev_blink = self._eyes.blink
         frozen = (self._static or (self._auto_static and self._other_fg)) and not self._hover
@@ -645,31 +653,35 @@ class Island(QWidget):
         # Nhạc đang phát thì luôn giữ nhịp: sóng, quầng sáng, nhịp nút play.
         # Kể cả lúc "đóng băng" vì app khác chiếm focus, chỉ hạ tần số vẽ.
         if playing:
-            self._eq += 0.34
-            self._pulse += 0.055
+            self._eq += dt * 10.0
+            self._pulse += dt * 1.7
 
+        dx = 0.0
         if not frozen:
-            dx = 0.0
             if self._hover:
                 dx = QCursor.pos().x() - self.mapToGlobal(self.rect().center()).x()
-            self._eyes.tick(playing, self._hover, dx, time.monotonic() - self._idle_since)
+            self._eyes.tick(playing, self._hover, dx, now - self._idle_since)
 
-        # Chỉ vẽ lại khi có hoạt cảnh thật sự. Trước đây hễ rê chuột là vẽ 30 fps
-        # bất kể có gì đổi hay không — đó là nguồn gây giật khi hover / kéo thả.
         blink_on = self._eyes.blink > 0.01 or prev_blink > 0.01
+
+        if playing:
+            # 60 fps khi đang rê chuột vào đảo (lúc cần mượt nhất),
+            # 30 fps khi chỉ liếc nhìn hoặc đang ở app khác.
+            if self._hover:
+                self.update()
+            elif self._tick_n % 2 == 0:
+                self.update()
+            return
         if self._hover:
             if self._marq or blink_on:
-                self.update()          # 30 fps: chữ chạy hoặc đang chớp mắt
-            elif playing and self._tick_n % 2 == 0:
-                self.update()          # 15 fps: sóng nhạc / thanh tiến trình
+                self.update()
+            elif abs(dx - self._eye_dx) > 1.2:
+                # mắt nhìn theo con trỏ: chỉ vẽ khi con trỏ dịch đủ xa
+                self._eye_dx = dx
+                self.update()
             return
         if not frozen and (self._marq or blink_on):
             self.update()
-            return
-        if playing:
-            # 15 fps khi đảo đang "rảnh", 7.5 fps khi đang bị app khác chiếm focus
-            if self._tick_n % (2 if not frozen else 4) == 0:
-                self.update()
             return
         # rảnh: chỉ vẽ lại khi phút đổi — gần như 0% CPU
         label = time.strftime("%H:%M")
@@ -890,18 +902,24 @@ class Island(QWidget):
         p.drawEllipse(QPointF(cx + rr * 0.30, cy + rr * 0.34), 0.72 * scale, 0.72 * scale)
 
     def _paint_rim_sweep(self, p: QPainter, r: QRectF):
-        """Vệt sáng chạy dọc mép trên khi nhạc đang phát (nhìn như có điện)."""
-        t = 0.5 + 0.5 * math.sin(self._pulse * 1.15)
-        cx = lerp(r.left() - 40.0, r.right() + 40.0, t)
-        g = QLinearGradient(cx - 78.0, 0.0, cx + 78.0, 0.0)
+        """Vệt sáng chạy dọc mép trên khi nhạc đang phát (nhìn như có điện).
+
+        Chỉ tô một dải gradient mảnh trên đoạn thẳng của mép trên thay vì stroke
+        lại toàn bộ path — nhanh hơn nhiều lần nên giữ được 60 fps.
+        """
+        t = (self._pulse * 0.30) % 1.0
+        x0 = r.left() + self._radius
+        x1 = r.right() - self._radius
+        if x1 <= x0:
+            return
+        cx = lerp(x0 - 70.0, x1 + 70.0, t)
+        g = QLinearGradient(cx - 80.0, 0.0, cx + 80.0, 0.0)
         g.setColorAt(0.0, rgba(255, 255, 255, 0))
-        g.setColorAt(0.5, rgba(255, 255, 255, 78))
+        g.setColorAt(0.5, rgba(255, 255, 255, 96))
         g.setColorAt(1.0, rgba(255, 255, 255, 0))
         p.save()
-        p.setClipRect(QRectF(r.left() - 2.0, r.top() - 1.5, r.width() + 4.0, 13.0))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QBrush(g), 1.3))
-        p.drawPath(pill_path(r, self._radius))
+        p.setClipRect(QRectF(x0, r.top() - 1.2, x1 - x0, 3.0))
+        p.fillRect(QRectF(cx - 80.0, r.top() - 0.6, 160.0, 2.0), g)
         p.restore()
 
     def _paint_idle(self, p: QPainter, r: QRectF):
