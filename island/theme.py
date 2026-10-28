@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetricsF
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QFontMetricsF,
+    QPainterPath,
+)
 
 # Vùng đệm quanh viên đảo để vẽ bóng đổ
 PAD = 22
@@ -33,19 +40,19 @@ def mix(a: QColor, b: QColor, t: float) -> QColor:
 class C:
     """Bảng màu. Nền đen tuyền kiểu OLED, viền sáng mảnh, chữ trắng ngà."""
 
-    bg_top = QColor(9, 9, 12)
+    bg_top = QColor(10, 10, 14)
     bg_mid = QColor(0, 0, 0)
-    bg_bottom = QColor(7, 7, 10)
+    bg_bottom = QColor(5, 5, 8)
 
     stroke = rgba(255, 255, 255, 30)
     stroke_soft = rgba(255, 255, 255, 14)
 
-    text = QColor(247, 248, 250)
-    dim = rgba(255, 255, 255, 168)
-    mute = rgba(255, 255, 255, 110)
-    faint = rgba(255, 255, 255, 52)
-    track = rgba(255, 255, 255, 30)
-    hair = rgba(255, 255, 255, 20)
+    text = QColor(248, 249, 251)
+    dim = rgba(255, 255, 255, 176)
+    mute = rgba(255, 255, 255, 116)
+    faint = rgba(255, 255, 255, 54)
+    track = rgba(255, 255, 255, 26)
+    hair = rgba(255, 255, 255, 18)
     chip = rgba(255, 255, 255, 12)
 
     accent = QColor(122, 173, 255)
@@ -110,3 +117,33 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 def lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
+
+
+def pill_path(rect: QRectF, radius: float, k: float = 0.52) -> QPainterPath:
+    """Đường bao góc cong liên tục (squircle) thay cho addRoundedRect.
+
+    Dùng cubic bezier với hệ số k thay vì cung tròn (k = 0.5523). Góc vì thế
+    "đầy" và mềm hơn — đúng cảm giác notch/Dynamic Island trên macOS, nhất là
+    khi bán kính bằng nửa chiều cao (dạng viên thuốc).
+    """
+    r = max(0.0, min(radius, min(rect.width(), rect.height()) / 2.0))
+    path = QPainterPath()
+    if r <= 0.05:
+        path.addRect(rect)
+        return path
+
+    x0, y0 = rect.left(), rect.top()
+    x1, y1 = rect.right(), rect.bottom()
+    c = r * clamp(k, 0.30, 0.56)
+
+    path.moveTo(x0 + r, y0)
+    path.lineTo(x1 - r, y0)
+    path.cubicTo(x1 - r + c, y0, x1, y0 + r - c, x1, y0 + r)
+    path.lineTo(x1, y1 - r)
+    path.cubicTo(x1, y1 - r + c, x1 - r + c, y1, x1 - r, y1)
+    path.lineTo(x0 + r, y1)
+    path.cubicTo(x0 + r - c, y1, x0, y1 - r + c, x0, y1 - r)
+    path.lineTo(x0, y0 + r)
+    path.cubicTo(x0, y0 + r - c, x0 + r - c, y0, x0 + r, y0)
+    path.closeSubpath()
+    return path

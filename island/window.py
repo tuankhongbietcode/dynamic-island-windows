@@ -53,7 +53,7 @@ from .audio import Volume
 from .debug import dbg
 from .eyes import Eyes
 from .monitor import fmt_rate
-from .theme import C, PAD, alpha, clamp, f, fm, lerp, mix, rgba
+from .theme import C, PAD, alpha, clamp, f, fm, lerp, mix, pill_path, rgba
 
 IDLE = "idle"
 COMPACT = "compact"
@@ -704,39 +704,44 @@ class Island(QWidget):
             QRectF(PAD, PAD, sw, sh),
         )
 
-        path = QPainterPath()
-        path.addRoundedRect(pill, self._radius, self._radius)
+        path = pill_path(pill, self._radius)
+        big = self._state in (EXPANDED, NOTIF, SHELF)
+
+        # Nền: đen tuyền kiểu OLED, chỉ hơi sáng sát mép trên để tạo khối.
         grad = QLinearGradient(0, pill.top(), 0, pill.bottom())
         grad.setColorAt(0.0, C.bg_top)
-        grad.setColorAt(0.45, C.bg_mid)
+        grad.setColorAt(0.38, C.bg_mid)
         grad.setColorAt(1.0, C.bg_bottom)
         cp.fillPath(path, QBrush(grad))
 
         cp.save()
         cp.setClipPath(path)
-        big = self._state in (EXPANDED, NOTIF, SHELF)
         if self._media.get("has"):
             glow = QRadialGradient(
                 QPointF(pill.left() + (76 if big else 42), pill.center().y()),
                 180 if big else 110,
             )
-            glow.setColorAt(0.0, alpha(self._accent, 19 if big else 13))
+            glow.setColorAt(0.0, alpha(self._accent, 20 if big else 13))
             glow.setColorAt(0.55, alpha(self._accent, 5 if big else 3))
             glow.setColorAt(1.0, alpha(self._accent, 0))
             cp.fillRect(pill, glow)
 
-        hl_h = min(58.0, pill.height() * 0.62)
+        # Sheen mảnh sát đỉnh: ánh sáng hắt từ màn hình, rất nhẹ để không bợt.
+        hl_h = min(46.0, pill.height() * 0.52)
         hl = QLinearGradient(0, pill.top(), 0, pill.top() + hl_h)
-        hl.setColorAt(0.0, QColor(255, 255, 255, 18))
+        hl.setColorAt(0.0, QColor(255, 255, 255, 15))
+        hl.setColorAt(0.38, QColor(255, 255, 255, 4))
         hl.setColorAt(1.0, QColor(255, 255, 255, 0))
         cp.fillRect(QRectF(pill.left(), pill.top(), pill.width(), hl_h), hl)
         cp.restore()
 
+        # Viền 2 lớp: vệt sáng trên đậm rồi tắt nhanh + hairline phía trong,
+        # cho cảm giác cạnh máy được vát chứ không phải hình dán phẳng.
         rim = QLinearGradient(0, pill.top(), 0, pill.bottom())
-        rim.setColorAt(0.0, rgba(255, 255, 255, 62))
-        rim.setColorAt(0.30, rgba(255, 255, 255, 18))
-        rim.setColorAt(0.70, rgba(255, 255, 255, 13))
-        rim.setColorAt(1.0, rgba(255, 255, 255, 30))
+        rim.setColorAt(0.0, rgba(255, 255, 255, 86))
+        rim.setColorAt(0.14, rgba(255, 255, 255, 26))
+        rim.setColorAt(0.62, rgba(255, 255, 255, 11))
+        rim.setColorAt(1.0, rgba(255, 255, 255, 26))
         cp.setBrush(Qt.BrushStyle.NoBrush)
         cp.setPen(QPen(QBrush(rim), 1.0))
         cp.drawPath(path)
@@ -756,8 +761,7 @@ class Island(QWidget):
         pill = self._pill_rect()
         p.drawPixmap(QPointF(0.0, 0.0), self._chrome())
 
-        path = QPainterPath()
-        path.addRoundedRect(pill, self._radius, self._radius)
+        path = pill_path(pill, self._radius)
 
         p.save()
         p.setClipPath(path)
@@ -806,17 +810,18 @@ class Island(QWidget):
         sp = QPainter(src)
         sp.setRenderHint(QPainter.RenderHint.Antialiasing)
         sp.setPen(Qt.PenStyle.NoPen)
-        sp.setBrush(QColor(0, 0, 0, 120))
-        sp.drawRoundedRect(QRectF(PAD - 2, PAD + 8, w + 4, h + 4), r + 2, r + 2)
-        sp.setBrush(QColor(0, 0, 0, 140))
-        sp.drawRoundedRect(QRectF(PAD, PAD + 3, w, h), r, r)
+        # Hai lớp: quầng rộng rất nhẹ + lõi sát viền, tổng thể mềm như macOS.
+        sp.setBrush(QColor(0, 0, 0, 92))
+        sp.drawRoundedRect(QRectF(PAD - 3, PAD + 10, w + 6, h + 6), r + 3, r + 3)
+        sp.setBrush(QColor(0, 0, 0, 128))
+        sp.drawRoundedRect(QRectF(PAD, PAD + 4, w, h), r, r)
         sp.end()
 
         scene = QGraphicsScene()
         scene.setSceneRect(0, 0, pw, ph)
         item = QGraphicsPixmapItem(src)
         blur = QGraphicsBlurEffect()
-        blur.setBlurRadius(17)
+        blur.setBlurRadius(19)
         item.setGraphicsEffect(blur)
         scene.addItem(item)
 
@@ -851,6 +856,31 @@ class Island(QWidget):
     def _eye_color(self) -> QColor:
         return C.eye(self._accent)
 
+    def _paint_camera(self, p: QPainter, cx: float, cy: float, scale: float = 1.0):
+        """Ống kính camera nhỏ trong notch — chi tiết đặc trưng của MacBook."""
+        rr = 4.6 * scale
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(rgba(255, 255, 255, 16))
+        p.drawEllipse(QPointF(cx, cy), rr + 0.7, rr + 0.7)
+
+        lens = QRadialGradient(QPointF(cx - rr * 0.34, cy - rr * 0.36), rr * 1.75)
+        lens.setColorAt(0.0, QColor(32, 43, 58))
+        lens.setColorAt(0.52, QColor(11, 15, 21))
+        lens.setColorAt(1.0, QColor(3, 5, 8))
+        p.setBrush(QBrush(lens))
+        p.drawEllipse(QPointF(cx, cy), rr, rr)
+
+        # lớp phủ thuỷ tinh hơi ánh màu nhấn
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(alpha(self._accent, 48), 0.9))
+        p.drawEllipse(QPointF(cx, cy), rr - 0.4, rr - 0.4)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(rgba(255, 255, 255, 124))
+        p.drawEllipse(QPointF(cx - rr * 0.33, cy - rr * 0.36), 1.05 * scale, 1.05 * scale)
+        p.setBrush(rgba(255, 255, 255, 38))
+        p.drawEllipse(QPointF(cx + rr * 0.30, cy + rr * 0.34), 0.72 * scale, 0.72 * scale)
+
     def _paint_idle(self, p: QPainter, r: QRectF):
         clock = time.strftime("%H:%M")
         date = _vn_short()
@@ -875,6 +905,9 @@ class Island(QWidget):
         p.setFont(date_font)
         p.setPen(C.mute)
         p.drawText(QRectF(bx, y0 + 19, block_w + 2, 14), LC, date)
+
+        # ống kính ở nửa phải, đúng vị trí camera trên notch MacBook
+        self._paint_camera(p, r.right() - 28.0, r.center().y())
 
     def _paint_compact(self, p: QPainter, r: QRectF):
         art = QRectF(r.left() + 7, r.top() + 7, 28, 28)
@@ -1052,23 +1085,22 @@ class Island(QWidget):
         frac = clamp(pos / dur, 0.0, 1.0) if dur > 0 else 0.0
 
         track_y = top + 88
-        th = 3.5
+        th = 3.0
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C.track)
         p.drawRoundedRect(QRectF(x, track_y, w, th), th / 2, th / 2)
         if frac > 0.004:
             fill_w = max(th, w * frac)
             fg = QLinearGradient(x, 0, x + fill_w, 0)
-            fg.setColorAt(0.0, alpha(self._accent, 190))
-            fg.setColorAt(1.0, mix(self._accent, QColor(255, 255, 255), 0.30))
+            fg.setColorAt(0.0, alpha(self._accent, 205))
+            fg.setColorAt(1.0, mix(self._accent, QColor(255, 255, 255), 0.45))
             p.setBrush(QBrush(fg))
             p.drawRoundedRect(QRectF(x, track_y, fill_w, th), th / 2, th / 2)
 
-        knob_x = x + w * frac
-        p.setBrush(alpha(self._accent, 70))
-        p.drawEllipse(QPointF(knob_x, track_y + th / 2), 5.4, 5.4)
-        p.setBrush(QColor(255, 255, 255))
-        p.drawEllipse(QPointF(knob_x, track_y + th / 2), 2.8, 2.8)
+            # chấm nhỏ ở đầu phát; ẩn khi chưa phát để không có chấm lạc ở mép trái
+            knob_x = x + w * frac
+            p.setBrush(QColor(255, 255, 255))
+            p.drawEllipse(QPointF(knob_x, track_y + th / 2), 2.6, 2.6)
 
         p.setFont(f(9.5, QFont.Weight.Medium, 0.2))
         p.setPen(C.mute)
@@ -1086,18 +1118,17 @@ class Island(QWidget):
         playing = bool(self._media.get("playing"))
         hot_play = self._hover_ctrl == "play"
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(alpha(QColor(255, 255, 255), 26 if hot_play else 13))
-        p.drawEllipse(QPointF(cx, cy), 21, 21)
-        p.setBrush(alpha(self._accent, 34 if hot_play else 18))
-        p.drawEllipse(QPointF(cx, cy), 21, 21)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(alpha(self._accent, 150 if hot_play else 90), 1.2))
+        if hot_play:
+            p.setBrush(rgba(255, 255, 255, 34))
+            p.drawEllipse(QPointF(cx, cy), 25, 25)
+        # nút trắng đặc + glyph đen, đúng kiểu Apple Music
+        p.setBrush(QColor(255, 255, 255, 236 if hot_play else 222))
         p.drawEllipse(QPointF(cx, cy), 21, 21)
 
         if playing:
-            icons.pause(p, QRectF(cx - 5.5, cy - 7.5, 11, 15), QColor(255, 255, 255))
+            icons.pause(p, QRectF(cx - 5.0, cy - 7.0, 10.0, 14.0), QColor(9, 9, 12))
         else:
-            icons.play(p, QRectF(cx - 4.5, cy - 8, 13, 16), QColor(255, 255, 255))
+            icons.play(p, QRectF(cx - 4.0, cy - 7.6, 12.0, 15.0), QColor(9, 9, 12))
 
         for name, ix, icon_fn in (
             ("prev", cx - 78 + 17, icons.prev),
