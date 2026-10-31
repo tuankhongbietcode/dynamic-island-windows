@@ -53,6 +53,7 @@ from .audio import Volume
 from .debug import dbg
 from .eyes import Eyes
 from .monitor import fmt_rate
+from .store import load_json, save_json
 from .theme import C, PAD, alpha, clamp, f, fm, lerp, mix, pill_path, rgba
 
 IDLE = "idle"
@@ -73,6 +74,11 @@ SIZES = {
 # (bước nhảy tick khi hover, bước nhảy tick khi rảnh) theo bậc máy nhanh/vừa/chậm.
 # Tick 16 ms nên bước 1 = 62 fps, 2 = 31 fps, 3 = 21 fps, 4 = 15 fps.
 _FPS_TIERS = ((1, 2), (2, 3), (3, 4))
+
+# Kệ file: nội dung được lưu xuống đĩa nên vẫn còn sau khi khởi động lại.
+SHELF_FILE = "shelf.json"
+SHELF_ROWS = 5      # số dòng hiện cùng lúc, phần còn lại cuộn
+SHELF_MAX = 40      # trần số file trên kệ (bỏ cái cũ nhất khi vượt)
 
 # Màu theo loại file (cho icon kệ)
 _FILE_COLORS = {
@@ -246,11 +252,21 @@ class Island(QWidget):
         self._notif_until = 0.0
         self._badge = False
 
-        # kệ file kéo-thả (kiểu Nusa)
-        self._shelf: list[dict] = []
+        # kệ file kéo-thả (kiểu Nusa) — nội dung nhớ qua các lần mở app
+        self._shelf: list[dict] = self._load_shelf()
         self._shelf_open = False
+        self._shelf_scroll = 0
         self._dragging = False
         self._chip_drag: dict | None = None  # {"path","press":QPointF} khi kéo 1 chip ra app khác
+        # Gộp nhiều thay đổi liên tiếp (thả 10 file, xoá nhanh) thành 1 lần ghi.
+        self._shelf_dirty = False
+        self._shelf_saver = QTimer(self)
+        self._shelf_saver.setSingleShot(True)
+        self._shelf_saver.setInterval(500)
+        self._shelf_saver.timeout.connect(self._flush_shelf)
+
+        # Thông báo tới khi đang hiện cái khác thì xếp hàng, không ghi đè.
+        self._notif_q: list[dict] = []
 
         self._art_px = QPixmap()
         self._art_big = QPixmap()
@@ -486,13 +502,30 @@ class Island(QWidget):
 
     def push_notification(self, payload: dict):
         dbg("notif push", payload.get("app"), "state", self._state)
-        if self._state == EXPANDED:
-            self._badge = True
+        # Đang hiện thông báo khác, hoặc panel đang mở (user chủ động xem):
+        # xếp hàng thay vì ghi đè — cái trước không bị mất.
+        if self._state == EXPANDED or self._notif_active():
+            self._notif_q.append(payload)
+            del self._notif_q[:-3]        # chỉ giữ 3 cái chờ gần nhất
+            if self._state == EXPANDED:
+                self._badge = True
             self.update()
             return
+        self._show_notification(payload)
+
+    def _show_notification(self, payload: dict):
         self._notif = payload
         self._notif_until = time.monotonic() + 5.5
+        self._badge = False
         self.refresh()
+        if self._state == NOTIF:
+            self.update()                 # đã ở NOTIF: chỉ đổi nội dung, khỏi morph lại
+
+    def _show_next_notification(self) -> bool:
+        if not self._notif_q:
+            return False
+        self._show_notification(self._notif_q.pop(0))
+        return True
 
     def _notif_active(self) -> bool:
         return self._notif is not None and time.monotonic() < self._notif_until
@@ -501,7 +534,13 @@ class Island(QWidget):
         if self._notif is not None and not self._notif_active():
             dbg("notif expired")
             self._notif = None
+            if self._show_next_notification():
+                return
             self.refresh()
+            return
+        # Thông báo tới lúc panel đang mở: hiện nốt khi user đóng panel.
+        if self._notif is None and self._notif_q and self._state not in (EXPANDED, SHELF):
+            self._show_next_notification()
 
     # ----------------------------------------------------------------- trạng thái
     def _desired_state(self) -> str:
@@ -1449,9 +1488,17 @@ class Island(QWidget):
         self._hits = {}
         pad = 22
         # --- header ---
-        p.setFont(f(13, QFont.Weight.DemiBold))
+        title_font = f(13, QFont.Weight.DemiBold)
+        p.setFont(title_font)
         p.setPen(C.text)
         p.drawText(QRectF(r.left() + pad, r.top() + 10, 200, 24), LC, "Kệ file")
+        if self._shelf:
+            p.setFont(f(11, QFont.Weight.DemiBold))
+            p.setPen(C.mute)
+            tw = fm(title_font).horizontalAdvance("Kệ file")
+            p.drawText(
+                QRectF(r.left() + pad + tw + 8, r.top() + 10, 40, 24), LC, str(len(self._shelf))
+            )
         cx = r.right() - 21
         cy = r.top() + 22
         cr = 10
@@ -1481,18 +1528,24 @@ class Island(QWidget):
 
         avail = r.bottom() - 12 - top
         total = len(self._shelf)
-        visible = min(total, 5)
-        row_h = min(34.0, avail / visible)
+        rows = self._shelf_rows()
+        off = int(clamp(self._shelf_scroll, 0, self._shelf_max_scroll()))
+        row_h = min(34.0, avail / rows)
         x = r.left() + pad
         w = r.width() - pad * 2
         del_w = 22
         size_w = 66
-        for i in range(visible):
-            item = self._shelf[i]
+        nmf = f(11.5, QFont.Weight.DemiBold)
+        szf = f(9.5, QFont.Weight.Medium)
+        for i in range(rows):
+            idx = off + i
+            if idx >= total:
+                break
+            item = self._shelf[idx]
             ry = top + i * row_h
             row = QRectF(x, ry + 2, w, row_h - 4)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(C.chip)
+            p.setBrush(C.track if self._hover_ctrl == f"shelf_open:{idx}" else C.chip)
             p.drawRoundedRect(row, 8, 8)
             # icon
             isz = min(26.0, row.height() - 6)
@@ -1500,14 +1553,13 @@ class Island(QWidget):
             icons.file(p, ir, _FILE_COLORS[item["type"]])
             # tên (cắt nếu dài)
             tx = ir.right() + 10
-            nmf = f(11.5, QFont.Weight.DemiBold)
             p.setFont(nmf)
             p.setPen(C.text)
             name_max = row.right() - size_w - del_w - tx - 4
             nm = fm(nmf).elidedText(item["name"], Qt.TextElideMode.ElideMiddle, int(max(20.0, name_max)))
             p.drawText(QRectF(tx, row.top(), name_max + 6, row.height()), LC, nm)
             # kích thước
-            p.setFont(f(9.5, QFont.Weight.Medium))
+            p.setFont(szf)
             p.setPen(C.dim)
             p.drawText(QRectF(row.right() - size_w - del_w, row.top(), size_w, row.height()), RC, item["size"])
             # nút xoá
@@ -1519,14 +1571,22 @@ class Island(QWidget):
             p.setPen(C.dim)
             p.setFont(f(12, QFont.Weight.DemiBold))
             p.drawText(QRectF(dx - 9, dy - 9, 18, 18), Qt.AlignmentFlag.AlignCenter, "×")
-            self._hits[f"shelf_del:{i}"] = QRectF(dx - 12, dy - 12, 24, 24)
-            self._hits[f"shelf_open:{i}"] = QRectF(row.left(), row.top(), row.right() - del_w - 2 - row.left(), row.height())
+            self._hits[f"shelf_del:{idx}"] = QRectF(dx - 12, dy - 12, 24, 24)
+            self._hits[f"shelf_open:{idx}"] = QRectF(row.left(), row.top(), row.right() - del_w - 2 - row.left(), row.height())
 
-        if total > visible:
-            my = top + visible * row_h + 2
-            p.setFont(f(9.5, QFont.Weight.Medium))
-            p.setPen(C.dim)
-            p.drawText(QRectF(x, my, w, 16), LC, f"và {total - visible} file khác…")
+        # --- thanh cuộn: chỉ hiện khi kệ dài hơn số dòng nhìn thấy ---
+        if total > rows:
+            bar_x = r.right() - 11.0
+            track = QRectF(bar_x, top + 1, 3.0, avail - 2)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(C.hair)
+            p.drawRoundedRect(track, 1.5, 1.5)
+            max_off = self._shelf_max_scroll()
+            t = (off / max_off) if max_off else 0.0
+            bar_h = max(20.0, track.height() * (rows / total))
+            by = track.top() + (track.height() - bar_h) * t
+            p.setBrush(alpha(C.text, 120))
+            p.drawRoundedRect(QRectF(bar_x, by, 3.0, bar_h), 1.5, 1.5)
 
     def _paint_notif(self, p: QPainter, r: QRectF):
         n = self._notif or {}
@@ -1556,7 +1616,8 @@ class Island(QWidget):
         p.drawText(box, CC, app[:1].upper())
 
         x = box.right() + 16
-        w = r.right() - 24 - x - 46
+        qn = len(self._notif_q)
+        w = r.right() - 24 - x - 46 - (32 if qn else 0)
 
         app_font = f(9.0, QFont.Weight.DemiBold, 1.0)
         p.setFont(app_font)
@@ -1566,6 +1627,16 @@ class Island(QWidget):
         p.setFont(f(8.5, QFont.Weight.Medium, 0.2))
         p.setPen(C.faint)
         p.drawText(QRectF(r.right() - 24 - 44, r.top() + 24, 44, 13), RC, "bây giờ")
+
+        # còn thông báo chờ: chip +N báo "còn nữa", bấm thẻ để xem tiếp
+        if qn:
+            pill = QRectF(r.right() - 24 - 44 - 29, r.top() + 22, 24, 16)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(alpha(self._accent, 48))
+            p.drawRoundedRect(pill, 8, 8)
+            p.setFont(f(9.0, QFont.Weight.DemiBold))
+            p.setPen(mix(self._accent, QColor(255, 255, 255), 0.42))
+            p.drawText(pill, Qt.AlignmentFlag.AlignCenter, f"+{qn}")
 
         title_font = f(13.5, QFont.Weight.DemiBold, -0.1)
         p.setFont(title_font)
@@ -1678,6 +1749,15 @@ class Island(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        if self._state == NOTIF and self._notif is not None:
+            # Bấm vào thẻ: bỏ qua cái này, hiện cái kế tiếp trong hàng đợi.
+            self._press = None
+            self._notif = None
+            self._notif_until = 0.0
+            self._suppressed = True
+            if not self._show_next_notification():
+                self.refresh()
+            return
         if self._vol_drag:
             self._vol_drag = False
             return
@@ -1729,6 +1809,19 @@ class Island(QWidget):
                 return name
         return None
 
+    def wheelEvent(self, event):
+        """Con lăn trên kệ file: cuộn danh sách khi có nhiều hơn 5 file."""
+        if self._state != SHELF or len(self._shelf) <= SHELF_ROWS:
+            event.ignore()
+            return
+        dy = event.angleDelta().y()
+        if not dy:
+            event.ignore()
+            return
+        steps = int(dy / 120) or (1 if dy > 0 else -1)
+        self._scroll_shelf(-steps)
+        event.accept()
+
     def _snap(self):
         screen = self.screen().availableGeometry()
         if abs(self._top - (screen.top() + 8)) < 48:
@@ -1739,6 +1832,58 @@ class Island(QWidget):
         self._reposition()
 
     # ----------------------------------------------------------------- kệ file
+    def _load_shelf(self) -> list[dict]:
+        """Nạp kệ đã lưu; bỏ file đã bị xoá/di chuyển khỏi đĩa."""
+        raw = load_json(SHELF_FILE, [])
+        if not isinstance(raw, list):
+            return []
+        items: list[dict] = []
+        seen: set[str] = set()
+        for entry in raw:
+            path = entry.get("path") if isinstance(entry, dict) else entry
+            if not isinstance(path, str) or not path:
+                continue
+            key = os.path.normcase(path)
+            if key in seen or not os.path.exists(path):
+                continue
+            seen.add(key)
+            items.append(self._make_shelf_item(path))
+            if len(items) >= SHELF_MAX:
+                break
+        return items
+
+    def _queue_shelf_save(self):
+        self._shelf_dirty = True
+        self._shelf_saver.start()
+
+    def _flush_shelf(self):
+        if not self._shelf_dirty:
+            return
+        self._shelf_dirty = False
+        save_json(SHELF_FILE, [it["path"] for it in self._shelf])
+
+    def flush_shelf(self):
+        """Gọi lúc thoát app: ghi ngay, không chờ hẹn giờ."""
+        self._shelf_saver.stop()
+        self._flush_shelf()
+
+    def _shelf_rows(self) -> int:
+        return min(len(self._shelf), SHELF_ROWS)
+
+    def _shelf_max_scroll(self) -> int:
+        return max(0, len(self._shelf) - SHELF_ROWS)
+
+    def _scroll_shelf(self, delta: int):
+        if not self._shelf:
+            return
+        new = int(clamp(self._shelf_scroll + delta, 0, self._shelf_max_scroll()))
+        if new != self._shelf_scroll:
+            self._shelf_scroll = new
+            self.update()
+
+    def _shelf_scroll_end(self):
+        self._shelf_scroll = self._shelf_max_scroll()
+
     def _make_shelf_item(self, path: str) -> dict:
         try:
             sz = os.path.getsize(path)
@@ -1755,12 +1900,29 @@ class Island(QWidget):
         return any(it["path"] == path for it in self._shelf)
 
     def _open_shelf_item(self, index: int):
-        if 0 <= index < len(self._shelf):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self._shelf[index]["path"]))
+        if not (0 <= index < len(self._shelf)):
+            return
+        path = self._shelf[index]["path"]
+        if not os.path.exists(path):
+            # file đã bị xoá/di chuyển từ lúc thả vào kệ -> dọn luôn cho khỏi "chết"
+            self._remove_shelf(index)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _add_shelf_path(self, path: str) -> bool:
+        if not path or self._shelf_contains(path) or not os.path.exists(path):
+            return False
+        if len(self._shelf) >= SHELF_MAX:
+            del self._shelf[0]
+        self._shelf.append(self._make_shelf_item(path))
+        self._queue_shelf_save()
+        return True
 
     def _remove_shelf(self, index: int):
         if 0 <= index < len(self._shelf):
             del self._shelf[index]
+            self._shelf_scroll = min(self._shelf_scroll, self._shelf_max_scroll())
+            self._queue_shelf_save()
             self.update()
             if not self._shelf:
                 self._shelf_open = False
@@ -1768,7 +1930,9 @@ class Island(QWidget):
 
     def _clear_shelf(self):
         self._shelf.clear()
+        self._shelf_scroll = 0
         self._shelf_open = False
+        self._queue_shelf_save()
         self.refresh()
 
     def _shelf_drag_pixmap(self, name: str) -> QPixmap:
@@ -1834,14 +1998,12 @@ class Island(QWidget):
         md = event.mimeData()
         added = False
         for u in md.urls():
-            if u.isLocalFile():
-                path = u.toLocalFile()
-                if os.path.exists(path) and not self._shelf_contains(path):
-                    self._shelf.append(self._make_shelf_item(path))
-                    added = True
+            if u.isLocalFile() and self._add_shelf_path(u.toLocalFile()):
+                added = True
         self._dragging = False
         if added:
             self._shelf_open = True
+            self._shelf_scroll_end()      # thả xong là thấy ngay file vừa thả
         self.refresh()
         event.acceptProposedAction()
 

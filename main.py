@@ -16,10 +16,11 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from island.media import MediaWorker
 from island.monitor import Monitor
 from island.notify import NotifyWorker
+from island.store import data_dir
 from island.window import Island
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "DynamicIsland")
+CONFIG_DIR = data_dir()
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 
@@ -143,8 +144,12 @@ def main() -> int:
     media.start()
     notifier.start()
 
-    def quit_app():
+    def save_state():
         save_config(island.config())
+        island.flush_shelf()
+
+    def quit_app():
+        save_state()
         media.stop()
         notifier.stop()
         media.wait(1200)
@@ -234,7 +239,7 @@ def main() -> int:
     tray.setContextMenu(menu)
     tray.show()
 
-    app.aboutToQuit.connect(lambda: save_config(island.config()))
+    app.aboutToQuit.connect(save_state)
     return app.exec()
 
 

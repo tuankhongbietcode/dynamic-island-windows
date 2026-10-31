@@ -134,7 +134,16 @@ def main():
         "body": "Mai 8h họp nhóm nhé, nhớ mang laptop",
     }
     island._notif_until = 9e9
+    island._notif_q = []
     shot(NOTIF, NOTIF, happy=1.0)
+
+    # còn 2 thông báo chờ -> chip +2
+    island._notif_q = [
+        {"app": "Outlook", "title": "Phòng Đào tạo", "body": "Lịch thi đã cập nhật"},
+        {"app": "Discord", "title": "#ctf-team", "body": "3 tin nhắn mới"},
+    ]
+    shot("notif_queue", NOTIF, happy=1.0)
+    island._notif_q = []
 
     # mở rộng khi không có nhạc: đồng hồ lớn + mắt
     island._notif = None
@@ -151,6 +160,29 @@ def main():
     ]
     island._shelf_open = True
     shot("shelf", SHELF, happy=0.6)
+
+    # kệ dài hơn 5 dòng: có thanh cuộn, đang cuộn xuống giữa
+    island._shelf = [
+        {"path": f"C:/Users/T/f{i}.png", "name": n, "size": s, "type": t}
+        for i, (n, s, t) in enumerate(
+            [
+                ("anh-bia-halloween.png", "2.4 MB", "img"),
+                ("WIDI HELLO - Ifan Seventeen.mp3", "5.1 MB", "aud"),
+                ("Báo cáo tháng 10.pdf", "880 KB", "doc"),
+                ("source-code-final.zip", "14.2 MB", "arc"),
+                ("screenshot-2026-10-28.png", "1.1 MB", "img"),
+                ("ghi-chu-hop.md", "12 KB", "doc"),
+                ("demo-quay-man-hinh.mp4", "48.7 MB", "vid"),
+                ("main.py", "6 KB", "code"),
+            ]
+        )
+    ]
+    island._shelf_scroll = 2
+    island._hover_ctrl = "shelf_open:4"
+    shot("shelf_many", SHELF, happy=0.6)
+    island._hover_ctrl = None
+    island._shelf_scroll = 0
+
     island._shelf = []
     island._dragging = True
     shot("shelf_drop", SHELF, happy=0.4)

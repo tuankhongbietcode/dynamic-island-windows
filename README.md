@@ -15,6 +15,10 @@ Toàn bộ code chạy trên máy bạn — không tải exe lạ, không gọi 
 |---|---|
 | ![thông báo](preview/notif.png) | ![kệ file](preview/shelf.png) |
 
+| Thông báo còn xếp hàng (`+2`) | Kệ dài: tự cuộn, thanh cuộn bên phải |
+|---|---|
+| ![hàng đợi thông báo](preview/notif_queue.png) | ![kệ nhiều file](preview/shelf_many.png) |
+
 ## Thiết kế
 
 Lấy cảm hứng từ mấy app notch kiểu macOS (Notchy, Nusa): nền **đen tuyền** thay vì xám, viền
@@ -60,9 +64,11 @@ Muốn tự khởi động cùng Windows: chuột phải lên island → **Khở
 | Kéo chuột | Di chuyển island, tự bám lại mép trên |
 | Trượt/click lên thanh âm lượng | Chỉnh âm lượng hệ thống; click icon loa để tắt/bật tiếng |
 | Kéo file vào island | Lưu tạm vào kệ file (SHELF) |
+| Lăn chuột trên kệ | Cuộn danh sách khi kệ có hơn 5 file (kèm thanh cuộn bên phải) |
 | Click file trên kệ | Mở file bằng ứng dụng mặc định |
 | Kéo file trên kệ ra ngoài | Đẩy file sang app khác (Explorer, chat…) |
 | Click dấu × trên kệ | Xoá file khỏi kệ |
+| Click thẻ thông báo | Bỏ qua thông báo này, hiện ngay cái kế tiếp trong hàng đợi |
 | Chuột phải | Menu: ghim, kệ file, về giữa màn hình, gửi thông báo thử, thoát |
 | Icon ở khay hệ thống | Menu đầy đủ: luôn trên cùng, chế độ tĩnh, tự động tĩnh, kệ file, khởi động cùng Windows |
 
@@ -72,7 +78,8 @@ Khi thu nhỏ:
 - **Không có nhạc** → đôi mắt + giờ + thứ/ngày.
 
 Khi có thông báo Windows → island tự bung thành thẻ thông báo 6 giây rồi thu lại.
-Nếu đang mở rộng thì chỉ hiện chấm đỏ ở góc, không cắt ngang việc bạn đang làm.
+Thông báo tới khi đang hiện cái khác (hoặc lúc bạn đang mở panel) **không bị mất**: nó xếp hàng,
+thẻ hiện chip `+N` và tự lần lượt hiện tiếp — bấm vào thẻ để bỏ qua cái đang xem.
 
 ## Chế độ tĩnh & Tối ưu CPU
 
@@ -135,13 +142,17 @@ Nếu app đó không hiện trong island, kiểm tra theo thứ tự:
 - **Kệ file kéo-thả (SHELF)**: kéo file từ Explorer hay bất kỳ đâu thả vào island để lưu tạm;
   click để mở bằng app mặc định, kéo ngược ra để đẩy file sang app khác, dấu × để xoá. Số lượng
   file đang lưu hiện thành huy hiệu nhỏ trên island khi thu gọn. Mở/đóng kệ qua chuột phải hoặc
-  icon khay hệ thống.
+  icon khay hệ thống. Kệ **nhớ qua các lần mở app** (lưu ở `%APPDATA%\DynamicIsland\shelf.json`),
+  file nào đã bị xoá/di chuyển khỏi đĩa thì tự rơi khỏi kệ; quá 5 file thì cuộn bằng con lăn.
+- **Thông báo xếp hàng**: nhiều thông báo tới dồn dập thì hiện lần lượt từng cái (tối đa 3 cái chờ),
+  không cái nào bị cái sau đè mất.
 - **Đồng hồ**: giờ ở trạng thái thu gọn, đồng hồ lớn + thứ/ngày khi mở rộng mà không có nhạc.
 
 ## Cấu hình
 
 Lưu ở `%APPDATA%\DynamicIsland\config.json` (vị trí island, trạng thái ghim, luôn trên cùng).
-Xoá file này để về mặc định.
+Danh sách file trên kệ nằm cạnh đó trong `shelf.json`. Xoá file này để về mặc định.
+Cả hai được ghi kiểu nguyên tử (ghi file tạm rồi `os.replace`) nên tắt máy đột ngột không làm hỏng file.
 
 ## Gỡ
 
