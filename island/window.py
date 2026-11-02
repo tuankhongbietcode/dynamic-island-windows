@@ -345,14 +345,14 @@ class Island(QWidget):
         self._morph = QVariantAnimation(self)
         self._morph.setStartValue(0.0)
         self._morph.setEndValue(1.0)
-        self._morph.setDuration(360)
-        self._morph.setEasingCurve(QEasingCurve.Type.OutExpo)
+        self._morph.setDuration(280)
+        self._morph.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._morph.valueChanged.connect(self._on_morph)
 
         self._fade = QVariantAnimation(self)
         self._fade.setStartValue(0.0)
         self._fade.setEndValue(1.0)
-        self._fade.setDuration(260)
+        self._fade.setDuration(220)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._fade.valueChanged.connect(self._on_fade)
 
@@ -392,6 +392,24 @@ class Island(QWidget):
 
         self._caps_state = bool(ctypes.windll.user32.GetKeyState(0x14) & 1)
         self._caps_overlay_until = 0.0
+
+        # Vô hiệu hoá viền xám và bo góc chữ nhật của Windows 11 DWM (khử 100% vùng xám ngoài viền)
+        try:
+            hwnd = int(self.winId())
+            # DWMWA_NCRENDERING_POLICY = 2, DWMNCRP_DISABLED = 1
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 2, ctypes.byref(ctypes.c_int(1)), 4
+            )
+            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_DONOTROUND = 1
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 33, ctypes.byref(ctypes.c_int(1)), 4
+            )
+            # DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_NONE = 0xFFFFFFFE
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 34, ctypes.byref(ctypes.c_int(0xFFFFFFFE)), 4
+            )
+        except Exception:
+            pass
 
         self._reposition()
 
@@ -643,10 +661,6 @@ class Island(QWidget):
         w1, h1, r1 = self._m_to
         w = lerp(w0, w1, t)
         h = lerp(h0, h1, t)
-        # OutExpo chạy ~60 fps và có đuôi rất mịn: bỏ qua khung hình đổi < 1px
-        # để khỏi resize cửa sổ + dựng lại nền vô ích.
-        if t < 1.0 and abs(w - self._size.width()) < 1.0 and abs(h - self._size.height()) < 1.0:
-            return
         self._size = QSizeF(w, h)
         self._radius = lerp(r0, r1, t)
         self._reposition()
@@ -857,7 +871,7 @@ class Island(QWidget):
 
     # ------------------------------------------------------------------ vẽ
     def _chrome(self) -> QPixmap:
-        """Nền OLED + bóng đổ + quầng sáng nhạc, cache lại theo kích thước và màu nhấn."""
+        """Nền OLED đen tuyền + bóng đổ Apple đa tầng mượt mà + viền gương sắc nét."""
         pill = self._pill_rect()
         key = (
             round(pill.width()),
@@ -880,34 +894,33 @@ class Island(QWidget):
         cp.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
-        
-        # Vẽ bóng đổ mượt mà bao quanh toàn bộ widget (0, 0, w, h)
-        sh_px, sw, sh = self._shadow_for(pill.width(), pill.height())
-        cp.drawPixmap(
-            QRectF(0, 0, w, h),
-            sh_px,
-            QRectF(0, 0, sh_px.width() / dpr, sh_px.height() / dpr),
-        )
 
         big = self._state in (EXPANDED, NOTIF, SHELF)
 
-        # Ambient Backlight phía sau đảo: quầng màu nhấn phản chiếu mượt xuống desktop khi có nhạc
+        # 1. Bounded Ambient Backlight Glow (khi có nhạc): An toàn trong vùng cách viền > 12px
         if self._media.get("has"):
-            bg_glow = QRadialGradient(
-                QPointF(pill.left() + (88 if big else 46), pill.center().y() + 4),
-                210 if big else 120,
-            )
-            bg_glow.setColorAt(0.0, alpha(self._accent, 36 if big else 24))
-            bg_glow.setColorAt(0.55, alpha(self._accent, 12 if big else 7))
-            bg_glow.setColorAt(1.0, alpha(self._accent, 0))
-            cp.fillRect(QRectF(0, 0, w, h), bg_glow)
+            glow_r = 75.0 if big else 50.0
+            glow_center = QPointF(pill.left() + (72 if big else 42), pill.center().y())
+            bg_glow = QRadialGradient(glow_center, glow_r)
+            bg_glow.setColorAt(0.0, alpha(self._accent, 26 if big else 16))
+            bg_glow.setColorAt(0.55, alpha(self._accent, 8 if big else 4))
+            bg_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+            glow_box = QRectF(pill.left() - 20, pill.top() - 20, pill.width() + 40, pill.height() + 40)
+            cp.fillRect(glow_box, bg_glow)
+
+        # 2. Vẽ bóng đổ đa tầng mượt mà (Feathered Apple Shadow) không bị lỗi chia dpr
+        sh_px, sw, sh = self._shadow_for(pill.width(), pill.height())
+        if round(w) == sh_px.width() and round(h) == sh_px.height():
+            cp.drawPixmap(QPointF(0.0, 0.0), sh_px)
+        else:
+            cp.drawPixmap(QRectF(0.0, 0.0, w, h), sh_px, QRectF(sh_px.rect()))
 
         path = pill_path(pill, self._radius)
 
-        # Nền: đen tuyền OLED (#000000) với gradient vi mô tạo khối
+        # 3. Nền đen tuyền OLED (#000000) với gradient vi mô tạo khối
         grad = QLinearGradient(0, pill.top(), 0, pill.bottom())
         grad.setColorAt(0.0, C.bg_top)
-        grad.setColorAt(0.38, C.bg_mid)
+        grad.setColorAt(0.40, C.bg_mid)
         grad.setColorAt(1.0, C.bg_bottom)
         cp.fillPath(path, QBrush(grad))
 
@@ -916,28 +929,28 @@ class Island(QWidget):
         if self._media.get("has"):
             glow = QRadialGradient(
                 QPointF(pill.left() + (76 if big else 42), pill.center().y()),
-                180 if big else 110,
+                160 if big else 100,
             )
             glow.setColorAt(0.0, alpha(self._accent, 22 if big else 14))
             glow.setColorAt(0.60, alpha(self._accent, 6 if big else 4))
             glow.setColorAt(1.0, alpha(self._accent, 0))
             cp.fillRect(pill, glow)
 
-        # Sheen mảnh sát đỉnh: ánh sáng gương sang trọng hắt từ mép trên
-        hl_h = min(48.0, pill.height() * 0.50)
+        # Ánh gương phản chiếu ở đỉnh
+        hl_h = min(44.0, pill.height() * 0.45)
         hl = QLinearGradient(0, pill.top(), 0, pill.top() + hl_h)
         hl.setColorAt(0.0, QColor(255, 255, 255, 22))
-        hl.setColorAt(0.35, QColor(255, 255, 255, 6))
+        hl.setColorAt(0.35, QColor(255, 255, 255, 5))
         hl.setColorAt(1.0, QColor(255, 255, 255, 0))
         cp.fillRect(QRectF(pill.left(), pill.top(), pill.width(), hl_h), hl)
         cp.restore()
 
-        # Viền vát 2 lớp cao cấp phong cách Apple Dynamic Island
+        # Viền gương vát 2 lớp tinh tế phong cách Apple Dynamic Island
         rim = QLinearGradient(0, pill.top(), 0, pill.bottom())
-        rim.setColorAt(0.0, rgba(255, 255, 255, 96))
-        rim.setColorAt(0.14, rgba(255, 255, 255, 30))
-        rim.setColorAt(0.65, rgba(255, 255, 255, 12))
-        rim.setColorAt(1.0, rgba(255, 255, 255, 28))
+        rim.setColorAt(0.0, rgba(255, 255, 255, 85))
+        rim.setColorAt(0.16, rgba(255, 255, 255, 26))
+        rim.setColorAt(0.65, rgba(255, 255, 255, 10))
+        rim.setColorAt(1.0, rgba(255, 255, 255, 24))
         cp.setBrush(Qt.BrushStyle.NoBrush)
         cp.setPen(QPen(QBrush(rim), 1.0))
         cp.drawPath(path)
@@ -1027,26 +1040,25 @@ class Island(QWidget):
         self._paint_ms = self._paint_ms * 0.90 + ms * 0.10
 
     def _render_shadow(self, w: float, h: float, r: float) -> QPixmap:
-        """Vẽ bóng đổ nhiều lớp siêu mượt chuẩn Apple (không bị cắt viền góc)."""
+        """Vẽ bóng đổ đa tầng chuẩn Apple: tiếp xúc sắc sảo + tán xạ mượt mà, triệt tiêu 100% viền xám."""
         pw, ph = round(w + 2 * PAD), round(h + 2 * PAD)
         src = QPixmap(pw, ph)
         src.fill(Qt.GlobalColor.transparent)
         sp = QPainter(src)
         sp.setRenderHint(QPainter.RenderHint.Antialiasing)
         sp.setPen(Qt.PenStyle.NoPen)
-        # Lớp 1: Ambient elevation shadow (rộng, mềm, tạo cảm giác lơ lửng)
-        sp.setBrush(QColor(0, 0, 0, 60))
-        sp.drawRoundedRect(QRectF(PAD, PAD + 8, w, h), r + 2, r + 2)
-        # Lớp 2: Contact shadow (sát chân đảo, tạo độ sâu sắc sảo)
-        sp.setBrush(QColor(0, 0, 0, 95))
-        sp.drawRoundedRect(QRectF(PAD, PAD + 2, w, h), r, r)
+        # 2 lớp bóng vật lý: contact shadow (chân đảo) + ambient elevation shadow (lơ lửng)
+        sp.setBrush(QColor(0, 0, 0, 85))
+        sp.drawRoundedRect(QRectF(PAD, PAD + 3, w, h), r, r)
+        sp.setBrush(QColor(0, 0, 0, 52))
+        sp.drawRoundedRect(QRectF(PAD, PAD + 6, w, h), r + 2, r + 2)
         sp.end()
 
         scene = QGraphicsScene()
         scene.setSceneRect(0, 0, pw, ph)
         item = QGraphicsPixmapItem(src)
         blur = QGraphicsBlurEffect()
-        blur.setBlurRadius(20)
+        blur.setBlurRadius(18)
         item.setGraphicsEffect(blur)
         scene.addItem(item)
 
@@ -1055,15 +1067,23 @@ class Island(QWidget):
         op = QPainter(out)
         scene.render(op, QRectF(0, 0, pw, ph), QRectF(0, 0, pw, ph))
         op.end()
-        return out
+
+        # Áp dụng Feather Edge Ramp: triệt tiêu hoàn toàn đuôi toán học của Gaussian blur ở viền ngoài
+        img = out.toImage()
+        w_img, h_img = img.width(), img.height()
+        for x in range(w_img):
+            for y in range(h_img):
+                d = min(x, w_img - 1 - x, y, h_img - 1 - y)
+                if d <= 5:
+                    img.setPixelColor(x, y, QColor(0, 0, 0, 0))
+                elif d < 14:
+                    factor = (d - 5) / 9.0
+                    c = img.pixelColor(x, y)
+                    img.setPixelColor(x, y, QColor(c.red(), c.green(), c.blue(), int(c.alpha() * factor)))
+
+        return QPixmap.fromImage(img)
 
     def _shadow_for(self, w: float, h: float):
-        """(pixmap, sw, sh) — mẫu bóng gần nhất trong 4 kích thước trạng thái.
-
-        Mỗi kích thước chỉ blur một lần rồi cache, nên lúc nghỉ bóng luôn đúng nét;
-        lúc bung/thu chỉ co giãn nhẹ từ mẫu gần nhất (không thấy khác biệt khi
-        đang chuyển động).
-        """
         best = None
         for _st, (sw, sh, sr) in SIZES.items():
             d = abs(sw - w) + abs(sh - h)
