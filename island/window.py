@@ -41,6 +41,7 @@ from PySide6.QtGui import (
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
+    QInputDialog,
     QGraphicsBlurEffect,
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -52,6 +53,8 @@ from . import icons
 from .audio import Volume
 from .debug import dbg
 from .eyes import Eyes
+from .lyrics import LyricsManager
+from .nusa_tools import FocusTimer, WaterTracker, TodoList
 from .monitor import fmt_rate
 from .store import load_json, save_json
 from .theme import C, PAD, alpha, clamp, f, fm, lerp, mix, pill_path, rgba
@@ -66,9 +69,9 @@ SHELF = "shelf"
 SIZES = {
     IDLE: (196, 42, 21.0),
     COMPACT: (250, 42, 21.0),
-    EXPANDED: (496, 184, 44.0),
+    EXPANDED: (520, 216, 44.0),
     NOTIF: (440, 100, 34.0),
-    SHELF: (496, 208, 44.0),
+    SHELF: (520, 216, 44.0),
 }
 
 # (bước nhảy tick khi hover, bước nhảy tick khi rảnh) theo bậc máy nhanh/vừa/chậm.
@@ -79,6 +82,16 @@ _FPS_TIERS = ((1, 2), (2, 3), (3, 4))
 SHELF_FILE = "shelf.json"
 SHELF_ROWS = 5      # số dòng hiện cùng lúc, phần còn lại cuộn
 SHELF_MAX = 40      # trần số file trên kệ (bỏ cái cũ nhất khi vượt)
+
+# Danh sách tab widget của Nusa
+NUSA_TABS = (
+    ("music", "Nhạc", "🎵"),
+    ("lyrics", "Lời", "🎤"),
+    ("timer", "Focus", "⏱️"),
+    ("water", "Nước", "💧"),
+    ("todo", "Việc", "📋"),
+    ("shelf", "Kệ", "📁"),
+)
 
 # Màu theo loại file (cho icon kệ)
 _FILE_COLORS = {
@@ -321,6 +334,7 @@ class Island(QWidget):
         self._vol_level, self._vol_muted = self._volume.refresh()
         self._vol_drag = False
         self._vol_rect = QRectF()
+        self._scrub_drag = False
         self._vol_timer = QTimer(self)
         self._vol_timer.setInterval(900)
         self._vol_timer.timeout.connect(self._poll_volume)
@@ -365,6 +379,20 @@ class Island(QWidget):
         self._notif_timer.timeout.connect(self._check_notif)
         self._notif_timer.start()
 
+        # Công cụ đặc trưng phong cách Nusa
+        self._tab = "music"
+        self._lyrics_mgr = LyricsManager(self)
+        self._lyrics_mgr.updated.connect(lambda _: self.update())
+
+        self._focus_timer = FocusTimer(self)
+        self._focus_timer.finished.connect(self._on_timer_finished)
+
+        self._water = WaterTracker()
+        self._todo = TodoList()
+
+        self._caps_state = bool(ctypes.windll.user32.GetKeyState(0x14) & 1)
+        self._caps_overlay_until = 0.0
+
         self._reposition()
 
     # ------------------------------------------------------------------ khung
@@ -387,6 +415,20 @@ class Island(QWidget):
             "static_mode": self._static,
             "auto_static": self._auto_static,
         }
+
+    def _on_timer_finished(self, mode: str):
+        if mode == "focus":
+            self.push_notification({
+                "app": "Pomodoro",
+                "title": "Hết giờ tập trung! 🍅",
+                "body": "Tuyệt vời! Đã hoàn thành 25 phút. Hãy nghỉ ngơi 5 phút nhé.",
+            })
+        else:
+            self.push_notification({
+                "app": "Pomodoro",
+                "title": "Hết giờ nghỉ ngơi! ⚡",
+                "body": "Đã sẵn sàng cho hiệp tập trung tiếp theo chưa nào?",
+            })
 
     def set_static(self, on: bool):
         """Chế độ tĩnh thủ công: đứng yên hoàn toàn, chỉ vẽ lại khi hover hoặc phút đổi."""
@@ -426,6 +468,11 @@ class Island(QWidget):
         self._media = payload
         if payload.get("has"):
             self._pos_base = payload.get("position", 0.0)
+            self._lyrics_mgr.request(
+                payload.get("title", ""),
+                payload.get("artist", ""),
+                payload.get("duration", 0.0),
+            )
             self._pos_at = time.monotonic()
             self._idle_since = time.monotonic()
             art = payload.get("art") or b""
@@ -714,6 +761,15 @@ class Island(QWidget):
         dt = min(0.12, max(0.0, now - self._last_tick))
         self._last_tick = now
 
+        self._focus_timer.update()
+
+        # Kiểm tra trạng thái Caps Lock thay đổi (phản hồi thời gian thực phong cách Nusa)
+        caps = bool(ctypes.windll.user32.GetKeyState(0x14) & 1)
+        if hasattr(self, "_caps_state") and caps != self._caps_state:
+            self._caps_state = caps
+            self._caps_overlay_until = time.monotonic() + 1.8
+            self.update()
+
         playing = bool(self._media.get("has") and self._media.get("playing"))
         prev_blink = self._eyes.blink
         frozen = (self._static or (self._auto_static and self._other_fg)) and not self._hover
@@ -801,7 +857,7 @@ class Island(QWidget):
 
     # ------------------------------------------------------------------ vẽ
     def _chrome(self) -> QPixmap:
-        """Nền + bóng đổ, cache lại theo kích thước và màu nhấn."""
+        """Nền OLED + bóng đổ + quầng sáng nhạc, cache lại theo kích thước và màu nhấn."""
         pill = self._pill_rect()
         key = (
             round(pill.width()),
@@ -824,17 +880,31 @@ class Island(QWidget):
         cp.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
+        
+        # Vẽ bóng đổ mượt mà bao quanh toàn bộ widget (0, 0, w, h)
         sh_px, sw, sh = self._shadow_for(pill.width(), pill.height())
         cp.drawPixmap(
-            QRectF(pill.left(), pill.top(), pill.width(), pill.height()),
+            QRectF(0, 0, w, h),
             sh_px,
-            QRectF(PAD, PAD, sw, sh),
+            QRectF(0, 0, sh_px.width() / dpr, sh_px.height() / dpr),
         )
 
-        path = pill_path(pill, self._radius)
         big = self._state in (EXPANDED, NOTIF, SHELF)
 
-        # Nền: đen tuyền kiểu OLED, chỉ hơi sáng sát mép trên để tạo khối.
+        # Ambient Backlight phía sau đảo: quầng màu nhấn phản chiếu mượt xuống desktop khi có nhạc
+        if self._media.get("has"):
+            bg_glow = QRadialGradient(
+                QPointF(pill.left() + (88 if big else 46), pill.center().y() + 4),
+                210 if big else 120,
+            )
+            bg_glow.setColorAt(0.0, alpha(self._accent, 36 if big else 24))
+            bg_glow.setColorAt(0.55, alpha(self._accent, 12 if big else 7))
+            bg_glow.setColorAt(1.0, alpha(self._accent, 0))
+            cp.fillRect(QRectF(0, 0, w, h), bg_glow)
+
+        path = pill_path(pill, self._radius)
+
+        # Nền: đen tuyền OLED (#000000) với gradient vi mô tạo khối
         grad = QLinearGradient(0, pill.top(), 0, pill.bottom())
         grad.setColorAt(0.0, C.bg_top)
         grad.setColorAt(0.38, C.bg_mid)
@@ -848,27 +918,26 @@ class Island(QWidget):
                 QPointF(pill.left() + (76 if big else 42), pill.center().y()),
                 180 if big else 110,
             )
-            glow.setColorAt(0.0, alpha(self._accent, 20 if big else 13))
-            glow.setColorAt(0.55, alpha(self._accent, 5 if big else 3))
+            glow.setColorAt(0.0, alpha(self._accent, 22 if big else 14))
+            glow.setColorAt(0.60, alpha(self._accent, 6 if big else 4))
             glow.setColorAt(1.0, alpha(self._accent, 0))
             cp.fillRect(pill, glow)
 
-        # Sheen mảnh sát đỉnh: ánh sáng hắt từ màn hình, rất nhẹ để không bợt.
-        hl_h = min(46.0, pill.height() * 0.52)
+        # Sheen mảnh sát đỉnh: ánh sáng gương sang trọng hắt từ mép trên
+        hl_h = min(48.0, pill.height() * 0.50)
         hl = QLinearGradient(0, pill.top(), 0, pill.top() + hl_h)
-        hl.setColorAt(0.0, QColor(255, 255, 255, 15))
-        hl.setColorAt(0.38, QColor(255, 255, 255, 4))
+        hl.setColorAt(0.0, QColor(255, 255, 255, 22))
+        hl.setColorAt(0.35, QColor(255, 255, 255, 6))
         hl.setColorAt(1.0, QColor(255, 255, 255, 0))
         cp.fillRect(QRectF(pill.left(), pill.top(), pill.width(), hl_h), hl)
         cp.restore()
 
-        # Viền 2 lớp: vệt sáng trên đậm rồi tắt nhanh + hairline phía trong,
-        # cho cảm giác cạnh máy được vát chứ không phải hình dán phẳng.
+        # Viền vát 2 lớp cao cấp phong cách Apple Dynamic Island
         rim = QLinearGradient(0, pill.top(), 0, pill.bottom())
-        rim.setColorAt(0.0, rgba(255, 255, 255, 86))
-        rim.setColorAt(0.14, rgba(255, 255, 255, 26))
-        rim.setColorAt(0.62, rgba(255, 255, 255, 11))
-        rim.setColorAt(1.0, rgba(255, 255, 255, 26))
+        rim.setColorAt(0.0, rgba(255, 255, 255, 96))
+        rim.setColorAt(0.14, rgba(255, 255, 255, 30))
+        rim.setColorAt(0.65, rgba(255, 255, 255, 12))
+        rim.setColorAt(1.0, rgba(255, 255, 255, 28))
         cp.setBrush(Qt.BrushStyle.NoBrush)
         cp.setPen(QPen(QBrush(rim), 1.0))
         cp.drawPath(path)
@@ -934,31 +1003,50 @@ class Island(QWidget):
             p.setFont(f(9, QFont.Weight.DemiBold))
             p.drawText(QRectF(cx - 8.5, cy - 8.5, 17, 17), Qt.AlignmentFlag.AlignCenter, label)
 
+        # Banner thông báo Caps Lock thời gian thực phong cách Nusa / macOS
+        now = time.monotonic()
+        if now < getattr(self, "_caps_overlay_until", 0.0):
+            remain = self._caps_overlay_until - now
+            caps_alpha = int(clamp(remain * 255 / 0.4, 0.0, 255.0)) if remain < 0.4 else 255
+            p.save()
+            p.setOpacity(caps_alpha / 255.0)
+            b_rect = QRectF(pill.left() + 38.0, pill.top() + 5.0, pill.width() - 76.0, pill.height() - 10.0)
+            p.setPen(QPen(alpha(QColor(255, 255, 255), 45), 1.0))
+            p.setBrush(QColor(10, 10, 14, 255))
+            p.drawRoundedRect(b_rect, 13, 13)
+
+            p.setFont(f(10.5, QFont.Weight.DemiBold, 0.2))
+            is_on = getattr(self, "_caps_state", False)
+            p.setPen(C.green if is_on else C.dim)
+            p.drawText(b_rect, CC, "⇪ Caps Lock: BẬT" if is_on else "⇪ Caps Lock: TẮT")
+            p.restore()
+
         p.end()
         # Trung bình trượt thời gian vẽ: máy yếu sẽ tự hạ mức fps thay vì giật.
         ms = (time.perf_counter() - t0) * 1000.0
         self._paint_ms = self._paint_ms * 0.90 + ms * 0.10
 
     def _render_shadow(self, w: float, h: float, r: float) -> QPixmap:
-        """Vẽ bóng đổ blur cho một kích thước (gọi một lần cho mỗi trạng thái)."""
+        """Vẽ bóng đổ nhiều lớp siêu mượt chuẩn Apple (không bị cắt viền góc)."""
         pw, ph = round(w + 2 * PAD), round(h + 2 * PAD)
         src = QPixmap(pw, ph)
         src.fill(Qt.GlobalColor.transparent)
         sp = QPainter(src)
         sp.setRenderHint(QPainter.RenderHint.Antialiasing)
         sp.setPen(Qt.PenStyle.NoPen)
-        # Hai lớp: quầng rộng rất nhẹ + lõi sát viền, tổng thể mềm như macOS.
-        sp.setBrush(QColor(0, 0, 0, 92))
-        sp.drawRoundedRect(QRectF(PAD - 3, PAD + 10, w + 6, h + 6), r + 3, r + 3)
-        sp.setBrush(QColor(0, 0, 0, 128))
-        sp.drawRoundedRect(QRectF(PAD, PAD + 4, w, h), r, r)
+        # Lớp 1: Ambient elevation shadow (rộng, mềm, tạo cảm giác lơ lửng)
+        sp.setBrush(QColor(0, 0, 0, 60))
+        sp.drawRoundedRect(QRectF(PAD, PAD + 8, w, h), r + 2, r + 2)
+        # Lớp 2: Contact shadow (sát chân đảo, tạo độ sâu sắc sảo)
+        sp.setBrush(QColor(0, 0, 0, 95))
+        sp.drawRoundedRect(QRectF(PAD, PAD + 2, w, h), r, r)
         sp.end()
 
         scene = QGraphicsScene()
         scene.setSceneRect(0, 0, pw, ph)
         item = QGraphicsPixmapItem(src)
         blur = QGraphicsBlurEffect()
-        blur.setBlurRadius(19)
+        blur.setBlurRadius(20)
         item.setGraphicsEffect(blur)
         scene.addItem(item)
 
@@ -1019,11 +1107,7 @@ class Island(QWidget):
         p.drawEllipse(QPointF(cx + rr * 0.30, cy + rr * 0.34), 0.72 * scale, 0.72 * scale)
 
     def _paint_rim_sweep(self, p: QPainter, r: QRectF):
-        """Vệt sáng chạy dọc mép trên khi nhạc đang phát (nhìn như có điện).
-
-        Chỉ tô một dải gradient mảnh trên đoạn thẳng của mép trên thay vì stroke
-        lại toàn bộ path — nhanh hơn nhiều lần nên giữ được 60 fps.
-        """
+        """Vệt sáng điện năng lượng chạy dọc mép trên khi nhạc đang phát."""
         t = (self._pulse * 0.30) % 1.0
         x0 = r.left() + self._radius
         x1 = r.right() - self._radius
@@ -1032,7 +1116,7 @@ class Island(QWidget):
         cx = lerp(x0 - 70.0, x1 + 70.0, t)
         g = QLinearGradient(cx - 80.0, 0.0, cx + 80.0, 0.0)
         g.setColorAt(0.0, rgba(255, 255, 255, 0))
-        g.setColorAt(0.5, rgba(255, 255, 255, 96))
+        g.setColorAt(0.5, mix(self._accent, QColor(255, 255, 255), 0.65))
         g.setColorAt(1.0, rgba(255, 255, 255, 0))
         p.save()
         p.setClipRect(QRectF(x0, r.top() - 1.2, x1 - x0, 3.0))
@@ -1098,18 +1182,23 @@ class Island(QWidget):
         )
 
     def _paint_eq(self, p: QPainter, r: QRectF):
-        """Sóng nhạc 5 vạch; hai tần số lệch pha để nhịp không đều như thật."""
+        """Sóng nhạc 5 vạch phong cách Apple Music với gradient và đầu bo tròn."""
         p.setPen(Qt.PenStyle.NoPen)
-        n, bw = 5, 2.2
+        n, bw = 5, 2.3
         gap = (r.width() - n * bw) / (n - 1)
         for i in range(n):
             a = 0.5 + 0.5 * math.sin(self._eq * 1.00 + i * 1.37)
             b = 0.5 + 0.5 * math.sin(self._eq * 0.63 + i * 2.11 + 1.2)
             amp = 0.20 + 0.80 * (a * 0.62 + b * 0.38)
-            hgt = max(2.4, r.height() * amp)
+            hgt = max(2.6, r.height() * amp)
             x = r.left() + i * (bw + gap)
             y = r.center().y() - hgt / 2.0
-            p.setBrush(alpha(self._accent, 120 + int(120 * amp)))
+            
+            # Gradient dọc từ ngọn sáng tới chân sóng
+            bg = QLinearGradient(x, y, x, y + hgt)
+            bg.setColorAt(0.0, mix(self._accent, QColor(255, 255, 255), 0.70))
+            bg.setColorAt(1.0, alpha(self._accent, 195))
+            p.setBrush(bg)
             p.drawRoundedRect(QRectF(x, y, bw, hgt), bw / 2, bw / 2)
 
     def _paint_art_glow(self, p: QPainter, art: QRectF):
@@ -1192,32 +1281,445 @@ class Island(QWidget):
         tile = self._art_tile_for(rect, radius, small)
         p.drawPixmap(rect, tile, QRectF(0.0, 0.0, rect.width(), rect.height()))
 
+    def _paint_tab_bar(self, p: QPainter, r: QRectF):
+        """Thanh điều hướng tab widget phong cách Nusa ở đỉnh panel mở rộng."""
+        n = len(NUSA_TABS)
+        tw = 72.0
+        gap = 5.0
+        total_w = n * tw + (n - 1) * gap
+        start_x = r.center().x() - total_w / 2.0
+        tab_y = r.top() + 8.0
+        th = 23.0
+
+        for i, (key, label, emoji) in enumerate(NUSA_TABS):
+            tx = start_x + i * (tw + gap)
+            tab_rect = QRectF(tx, tab_y, tw, th)
+            self._hits[f"tab:{key}"] = tab_rect
+
+            is_active = (self._tab == key)
+            is_hover = (self._hover_ctrl == f"tab:{key}")
+
+            p.setPen(Qt.PenStyle.NoPen)
+            if is_active:
+                bg = QLinearGradient(tx, tab_y, tx, tab_y + th)
+                bg.setColorAt(0.0, alpha(self._accent, 55))
+                bg.setColorAt(1.0, alpha(self._accent, 35))
+                p.setBrush(QBrush(bg))
+                p.drawRoundedRect(tab_rect, 11.5, 11.5)
+
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(alpha(self._accent, 115), 1.0))
+                p.drawRoundedRect(tab_rect, 11.5, 11.5)
+            elif is_hover:
+                p.setBrush(rgba(255, 255, 255, 20))
+                p.drawRoundedRect(tab_rect, 11.5, 11.5)
+
+            p.setFont(f(10.0, QFont.Weight.DemiBold if is_active else QFont.Weight.Medium, 0.1))
+            p.setPen(C.text if is_active else C.dim)
+            p.drawText(tab_rect, CC, f"{emoji} {label}")
+
     def _paint_expanded(self, p: QPainter, r: QRectF):
-        has = self._media.get("has")
         self._hits = {}
+        self._paint_tab_bar(p, r)
+
+        if self._tab == "lyrics":
+            self._paint_tab_lyrics(p, r)
+        elif self._tab == "timer":
+            self._paint_tab_timer(p, r)
+        elif self._tab == "water":
+            self._paint_tab_water(p, r)
+        elif self._tab == "todo":
+            self._paint_tab_todo(p, r)
+        elif self._tab == "shelf":
+            self._paint_shelf(p, r)
+        else:
+            self._paint_tab_music(p, r)
+
+    def _paint_tab_music(self, p: QPainter, r: QRectF):
+        """Tab Nhạc: Trình phát nhạc SMTC đầy đủ + Thống kê hệ thống CPU/RAM/NET/PIN + Âm lượng."""
+        has = self._media.get("has")
+        content_top = r.top() + 36.0
 
         if has:
+            art = QRectF(r.left() + 24, content_top + 10, 88, 88)
+            self._paint_art_glow(p, art)
+            self._paint_art(p, art, 18)
+            # Mascot eyes đặt ngay dưới bìa đĩa
             self._eyes.paint(
                 p,
-                QRectF(r.center().x() - 13, r.top() + 10, 26.0, 12.0),
+                QRectF(r.left() + 40, content_top + 108, 56.0, 18.0),
                 self._eye_color(),
             )
-            art = QRectF(r.left() + EXP_ART_X, r.top() + EXP_ART_Y, EXP_ART, EXP_ART)
-            self._paint_art_glow(p, art)
-            self._paint_art(p, art, 20)
-            self._paint_media(p, r, r.left() + EXP_TEXT_X, EXP_TEXT_W)
+            self._paint_media(p, r, r.left() + 128, 224)
         else:
             self._paint_clock(p, r)
 
-        dx = r.left() + EXP_DIV_X
-        dg = QLinearGradient(0, r.top() + 26, 0, r.bottom() - 26)
+        dx = r.left() + 364.0
+        dg = QLinearGradient(0, content_top + 8, 0, r.bottom() - 18)
         dg.setColorAt(0.0, alpha(QColor(255, 255, 255), 0))
         dg.setColorAt(0.5, alpha(QColor(255, 255, 255), 28))
         dg.setColorAt(1.0, alpha(QColor(255, 255, 255), 0))
         p.setPen(QPen(QBrush(dg), 1.0))
-        p.drawLine(QPointF(dx, r.top() + 26), QPointF(dx, r.bottom() - 26))
+        p.drawLine(QPointF(dx, content_top + 8), QPointF(dx, r.bottom() - 18))
 
-        self._paint_stats(p, r, r.left() + EXP_STAT_X, EXP_STAT_W)
+        self._paint_stats(p, r, dx + 16.0, r.right() - dx - 36.0)
+
+    def _paint_tab_lyrics(self, p: QPainter, r: QRectF):
+        """Tab Lời bài hát: Đồng bộ thời gian thực chuẩn Nusa / Apple Music từ LRCLIB."""
+        content_top = r.top() + 38.0
+        has = self._media.get("has")
+        if not has:
+            p.setFont(f(12.0, QFont.Weight.Medium))
+            p.setPen(C.dim)
+            p.drawText(
+                QRectF(r.left() + 24, content_top, r.width() - 48, r.height() - 48),
+                Qt.AlignmentFlag.AlignCenter,
+                "Chưa có bài hát nào đang phát 🎵\nHãy mở nhạc trên Spotify, YouTube, Apple Music hoặc trình duyệt!",
+            )
+            return
+
+        lines = self._lyrics_mgr.get_lines()
+        pos = self._current_position()
+        dur = self._media.get("duration", 0.0)
+
+        lx = r.left() + 28.0
+        lw = r.width() - 56.0
+
+        if not lines:
+            title = self._media.get("title", "")
+            artist = self._media.get("artist", "")
+            p.setFont(f(13.0, QFont.Weight.DemiBold))
+            p.setPen(C.text)
+            p.drawText(
+                QRectF(lx, content_top + 16, lw, 24),
+                CC,
+                _elide(f"{title} - {artist}" if artist else title, f(13.0, QFont.Weight.DemiBold), lw),
+            )
+            p.setFont(f(11.0, QFont.Weight.Normal))
+            p.setPen(C.mute)
+            p.drawText(
+                QRectF(lx, content_top + 46, lw, 24),
+                CC,
+                "Đang tìm kiếm lời bài hát đồng bộ trên LRCLIB...",
+            )
+            ref_rect = QRectF(r.center().x() - 60, content_top + 80, 120, 28)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(C.chip)
+            p.drawRoundedRect(ref_rect, 14, 14)
+            p.setFont(f(10.0, QFont.Weight.Medium))
+            p.setPen(C.dim)
+            p.drawText(ref_rect, CC, "⟳ Thử tải lại")
+            self._hits["lyrics_refresh"] = ref_rect
+            return
+
+        active_idx = self._lyrics_mgr.active_index(pos)
+        if active_idx < 0:
+            active_idx = 0
+
+        # Hiển thị 4 dòng lời đồng bộ
+        prev_idx = active_idx - 1
+        if prev_idx >= 0:
+            p.setFont(f(10.5, QFont.Weight.Normal))
+            p.setPen(alpha(C.mute, 120))
+            prev_rect = QRectF(lx, content_top + 4, lw, 22)
+            p.drawText(prev_rect, CC, _elide(lines[prev_idx]["text"], f(10.5, QFont.Weight.Normal), lw))
+            self._hits[f"lyric:{lines[prev_idx]['time']}"] = prev_rect
+
+        cur_text = lines[active_idx]["text"] if 0 <= active_idx < len(lines) else ""
+        cur_rect = QRectF(lx, content_top + 28, lw, 36)
+        hl_box = QRectF(lx + 8, content_top + 28, lw - 16, 36)
+        p.setPen(QPen(alpha(self._accent, 90), 1.0))
+        p.setBrush(alpha(self._accent, 36))
+        p.drawRoundedRect(hl_box, 10, 10)
+
+        p.setFont(f(13.0, QFont.Weight.DemiBold))
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(cur_rect, CC, _elide(f"🎤  {cur_text}", f(13.0, QFont.Weight.DemiBold), lw - 24))
+        if 0 <= active_idx < len(lines):
+            self._hits[f"lyric:{lines[active_idx]['time']}"] = hl_box
+
+        next1_idx = active_idx + 1
+        if next1_idx < len(lines):
+            p.setFont(f(11.0, QFont.Weight.Medium))
+            p.setPen(C.dim)
+            next1_rect = QRectF(lx, content_top + 70, lw, 24)
+            p.drawText(next1_rect, CC, _elide(lines[next1_idx]["text"], f(11.0, QFont.Weight.Medium), lw))
+            self._hits[f"lyric:{lines[next1_idx]['time']}"] = next1_rect
+
+        next2_idx = active_idx + 2
+        if next2_idx < len(lines):
+            p.setFont(f(10.0, QFont.Weight.Normal))
+            p.setPen(alpha(C.mute, 100))
+            next2_rect = QRectF(lx, content_top + 98, lw, 22)
+            p.drawText(next2_rect, CC, _elide(lines[next2_idx]["text"], f(10.0, QFont.Weight.Normal), lw))
+            self._hits[f"lyric:{lines[next2_idx]['time']}"] = next2_rect
+
+        # Thanh tiến độ và thời gian ở đáy tab lời
+        track_y = r.bottom() - 24.0
+        frac = clamp(pos / dur, 0.0, 1.0) if dur > 0 else 0.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C.track)
+        p.drawRoundedRect(QRectF(lx + 40, track_y, lw - 80, 3.0), 1.5, 1.5)
+        if frac > 0.002:
+            p.setBrush(alpha(self._accent, 220))
+            p.drawRoundedRect(QRectF(lx + 40, track_y, max(3.0, (lw - 80) * frac), 3.0), 1.5, 1.5)
+        self._hits["track"] = QRectF(lx + 36, track_y - 6, lw - 72, 16.0)
+
+        p.setFont(f(9.0, QFont.Weight.Medium, 0.2))
+        p.setPen(C.mute)
+        p.drawText(QRectF(lx, track_y - 5, 36, 14), RC, _mmss(pos))
+        p.drawText(QRectF(r.right() - 28 - 36, track_y - 5, 36, 14), LC, _mmss(dur))
+
+    def _paint_tab_timer(self, p: QPainter, r: QRectF):
+        """Tab Focus Pomodoro: 25 phút tập trung / 5 phút nghỉ ngơi."""
+        content_top = r.top() + 38.0
+        ft = self._focus_timer
+
+        cx = r.left() + 112.0
+        cy = content_top + 76.0
+        radius = 50.0
+
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(C.track, 6.0))
+        p.drawEllipse(QPointF(cx, cy), radius, radius)
+
+        prog = ft.progress
+        if prog > 0.003:
+            arc_col = C.amber if ft.mode == "break" else self._accent
+            p.setPen(QPen(arc_col, 6.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            span_angle = int(-prog * 360 * 16)
+            p.drawArc(QRectF(cx - radius, cy - radius, radius * 2, radius * 2), 90 * 16, span_angle)
+
+        p.setFont(f(22.0, QFont.Weight.Bold))
+        p.setPen(C.text)
+        p.drawText(QRectF(cx - 50, cy - 20, 100, 30), CC, ft.time_str)
+
+        p.setFont(f(8.5, QFont.Weight.DemiBold, 0.6))
+        mode_text = "NGHỈ NGƠI" if ft.mode == "break" else "TẬP TRUNG"
+        p.setPen(C.amber if ft.mode == "break" else self._accent)
+        p.drawText(QRectF(cx - 50, cy + 10, 100, 16), CC, mode_text)
+
+        rx = r.left() + 214.0
+        rw = r.right() - 28.0 - rx
+
+        btn_mode_w = (rw - 8.0) / 2.0
+        rect_focus = QRectF(rx, content_top + 10, btn_mode_w, 28)
+        rect_break = QRectF(rx + btn_mode_w + 8, content_top + 10, btn_mode_w, 28)
+        self._hits["timer_set_focus"] = rect_focus
+        self._hits["timer_set_break"] = rect_break
+
+        for (btn_r, label, is_sel, col) in (
+            (rect_focus, "🎯 Focus (25m)", ft.mode == "focus", self._accent),
+            (rect_break, "☕ Nghỉ (5m)", ft.mode == "break", C.amber),
+        ):
+            p.setPen(Qt.PenStyle.NoPen)
+            if is_sel:
+                p.setBrush(alpha(col, 48))
+                p.drawRoundedRect(btn_r, 14, 14)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(alpha(col, 130), 1.0))
+                p.drawRoundedRect(btn_r, 14, 14)
+            else:
+                p.setBrush(C.chip)
+                p.drawRoundedRect(btn_r, 14, 14)
+
+            p.setFont(f(10.0, QFont.Weight.DemiBold if is_sel else QFont.Weight.Medium))
+            p.setPen(C.text if is_sel else C.dim)
+            p.drawText(btn_r, CC, label)
+
+        btn_action_w = rw - 80.0
+        rect_action = QRectF(rx, content_top + 52, btn_action_w, 36)
+        rect_reset = QRectF(rx + btn_action_w + 8, content_top + 52, 72, 36)
+        self._hits["timer_toggle"] = rect_action
+        self._hits["timer_reset"] = rect_reset
+
+        p.setPen(Qt.PenStyle.NoPen)
+        if ft.running:
+            p.setBrush(alpha(self._accent, 220))
+            p.drawRoundedRect(rect_action, 18, 18)
+            p.setFont(f(12.0, QFont.Weight.Bold))
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(rect_action, CC, "⏸  Tạm dừng")
+        else:
+            p.setBrush(QColor(255, 255, 255, 235))
+            p.drawRoundedRect(rect_action, 18, 18)
+            p.setFont(f(12.0, QFont.Weight.Bold))
+            p.setPen(QColor(10, 10, 14))
+            p.drawText(rect_action, CC, "▶  Bắt đầu")
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C.chip)
+        p.drawRoundedRect(rect_reset, 18, 18)
+        p.setFont(f(10.5, QFont.Weight.Medium))
+        p.setPen(C.dim)
+        p.drawText(rect_reset, CC, "↺ Đặt lại")
+
+        p.setFont(f(9.5, QFont.Weight.Normal))
+        p.setPen(C.mute)
+        wrap_flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextWordWrap)
+        p.drawText(
+            QRectF(rx, content_top + 98, rw, 40),
+            wrap_flags,
+            "💡 Chu kỳ Pomodoro: 25 phút tập trung cao độ, sau đó nghỉ ngơi 5 phút để tái tạo năng lượng não bộ.",
+        )
+
+    def _paint_tab_water(self, p: QPainter, r: QRectF):
+        """Tab Nước: Theo dõi lượng nước uống hàng ngày với ly nước trực quan."""
+        content_top = r.top() + 38.0
+        wt = self._water
+
+        cx = r.left() + 90.0
+        cy = content_top + 76.0
+        cw = 62.0
+        ch = 110.0
+        cup_rect = QRectF(cx - cw / 2.0, cy - ch / 2.0, cw, ch)
+
+        p.setPen(QPen(alpha(C.cyan, 75), 1.2))
+        p.setBrush(QColor(12, 22, 34, 220))
+        p.drawRoundedRect(cup_rect, 16, 16)
+
+        prog = wt.progress
+        if prog > 0.005:
+            wh = max(12.0, ch * prog)
+            water_rect = QRectF(cup_rect.left() + 2, cup_rect.bottom() - wh + 1, cw - 4, wh - 3)
+            wg = QLinearGradient(0, water_rect.top(), 0, water_rect.bottom())
+            wg.setColorAt(0.0, QColor(0, 210, 255, 230))
+            wg.setColorAt(1.0, QColor(0, 110, 240, 230))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(wg))
+            p.drawRoundedRect(water_rect, 14, 14)
+
+        p.setFont(f(13.0, QFont.Weight.Bold))
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(cup_rect, CC, f"{round(prog * 100)}%")
+
+        rx = r.left() + 168.0
+        rw = r.right() - 28.0 - rx
+
+        p.setFont(f(11.0, QFont.Weight.DemiBold))
+        p.setPen(C.cyan)
+        p.drawText(QRectF(rx, content_top + 6, rw, 16), LC, "LƯỢNG NƯỚC HÔM NAY")
+
+        p.setFont(f(24.0, QFont.Weight.Bold))
+        p.setPen(C.text)
+        amount_str = f"{wt.drank} "
+        p.drawText(QRectF(rx, content_top + 24, 120, 32), LC, amount_str)
+        aw = fm(f(24.0, QFont.Weight.Bold)).horizontalAdvance(amount_str)
+        p.setFont(f(13.0, QFont.Weight.Medium))
+        p.setPen(C.mute)
+        p.drawText(QRectF(rx + aw, content_top + 28, rw - aw, 26), LC, f"/ {wt.goal} ml")
+
+        btn_w = (rw - 10.0) / 2.0
+        rect_250 = QRectF(rx, content_top + 66, btn_w, 32)
+        rect_500 = QRectF(rx + btn_w + 10, content_top + 66, btn_w, 32)
+        self._hits["water_add_250"] = rect_250
+        self._hits["water_add_500"] = rect_500
+
+        for (btn_r, label, col) in (
+            (rect_250, "+250 ml (Ly)", C.cyan),
+            (rect_500, "+500 ml (Chai)", self._accent),
+        ):
+            p.setPen(QPen(alpha(col, 80), 1.0))
+            p.setBrush(alpha(col, 34))
+            p.drawRoundedRect(btn_r, 16, 16)
+            p.setFont(f(10.5, QFont.Weight.DemiBold))
+            p.setPen(C.text)
+            p.drawText(btn_r, CC, label)
+
+        rect_rst = QRectF(rx, content_top + 108, 76, 24)
+        self._hits["water_reset"] = rect_rst
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C.chip)
+        p.drawRoundedRect(rect_rst, 12, 12)
+        p.setFont(f(9.5, QFont.Weight.Medium))
+        p.setPen(C.dim)
+        p.drawText(rect_rst, CC, "↺ Đặt lại")
+
+        p.setFont(f(9.5, QFont.Weight.Normal))
+        p.setPen(C.mute)
+        p.drawText(
+            QRectF(rx + 86, content_top + 108, rw - 86, 24),
+            LC,
+            "🎉 Đã đủ chỉ tiêu!" if wt.drank >= wt.goal else f"Còn thiếu {wt.goal - wt.drank} ml nữa",
+        )
+
+    def _paint_tab_todo(self, p: QPainter, r: QRectF):
+        """Tab Việc cần làm: Quản lý ghi chú công việc nhanh kiểu checklist."""
+        content_top = r.top() + 38.0
+        items = self._todo.items
+        done_cnt = sum(1 for it in items if it.get("done"))
+        tot_cnt = len(items)
+
+        lx = r.left() + 24.0
+        lw = r.width() - 48.0
+
+        p.setFont(f(11.5, QFont.Weight.DemiBold))
+        p.setPen(C.text)
+        p.drawText(QRectF(lx, content_top + 4, 200, 22), LC, f"Việc cần làm ({done_cnt}/{tot_cnt})")
+
+        add_btn = QRectF(r.right() - 24 - 96, content_top + 2, 96, 26)
+        self._hits["todo_add"] = add_btn
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(alpha(self._accent, 45))
+        p.drawRoundedRect(add_btn, 13, 13)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(alpha(self._accent, 110), 1.0))
+        p.drawRoundedRect(add_btn, 13, 13)
+        p.setFont(f(10.0, QFont.Weight.DemiBold))
+        p.setPen(C.text)
+        p.drawText(add_btn, CC, "+ Thêm việc")
+
+        if not items:
+            p.setFont(f(11.5, QFont.Weight.Medium))
+            p.setPen(C.mute)
+            p.drawText(
+                QRectF(lx, content_top + 40, lw, 80),
+                CC,
+                "Không có việc nào cần làm. Hãy bấm '+ Thêm việc' để ghi chú! ✨",
+            )
+            return
+
+        row_h = 26.0
+        for i, item in enumerate(items[:4]):
+            ry = content_top + 36.0 + i * (row_h + 4.0)
+            row_rect = QRectF(lx, ry, lw, row_h)
+
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(C.chip)
+            p.drawRoundedRect(row_rect, 8, 8)
+
+            box_rect = QRectF(lx + 8, ry + 4, 18, 18)
+            self._hits[f"todo_toggle:{i}"] = box_rect
+
+            is_done = item.get("done")
+            if is_done:
+                p.setBrush(C.green)
+                p.drawRoundedRect(box_rect, 5, 5)
+                p.setFont(f(11.0, QFont.Weight.Bold))
+                p.setPen(QColor(10, 10, 14))
+                p.drawText(box_rect, CC, "✓")
+            else:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(C.dim, 1.2))
+                p.drawRoundedRect(box_rect, 5, 5)
+
+            p.setFont(f(11.0, QFont.Weight.Medium))
+            txt_rect = QRectF(lx + 34, ry, lw - 68, row_h)
+            if is_done:
+                p.setPen(C.mute)
+                p.drawText(txt_rect, LC, item.get("text", ""))
+                tw = min(txt_rect.width(), fm(f(11.0, QFont.Weight.Medium)).horizontalAdvance(item.get("text", "")))
+                p.setPen(QPen(C.mute, 1.2))
+                p.drawLine(QPointF(lx + 34, ry + row_h / 2.0), QPointF(lx + 34 + tw, ry + row_h / 2.0))
+            else:
+                p.setPen(C.text)
+                p.drawText(txt_rect, LC, item.get("text", ""))
+
+            del_rect = QRectF(r.right() - 24 - 24, ry + 2, 22, 22)
+            self._hits[f"todo_del:{i}"] = del_rect
+            p.setFont(f(12.0, QFont.Weight.DemiBold))
+            p.setPen(C.mute)
+            p.drawText(del_rect, CC, "×")
 
     def _marquee(
         self,
@@ -1298,37 +1800,43 @@ class Island(QWidget):
         frac = clamp(pos / dur, 0.0, 1.0) if dur > 0 else 0.0
 
         track_y = top + 88
-        th = 3.0
+        th = 3.5
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C.track)
         p.drawRoundedRect(QRectF(x, track_y, w, th), th / 2, th / 2)
         if frac > 0.004:
             fill_w = max(th, w * frac)
             fg = QLinearGradient(x, 0, x + fill_w, 0)
-            fg.setColorAt(0.0, alpha(self._accent, 205))
-            fg.setColorAt(1.0, mix(self._accent, QColor(255, 255, 255), 0.45))
+            fg.setColorAt(0.0, alpha(self._accent, 220))
+            fg.setColorAt(1.0, mix(self._accent, QColor(255, 255, 255), 0.55))
             p.setBrush(QBrush(fg))
             p.drawRoundedRect(QRectF(x, track_y, fill_w, th), th / 2, th / 2)
 
-            # chấm nhỏ ở đầu phát; ẩn khi chưa phát để không có chấm lạc ở mép trái
             knob_x = x + w * frac
-            if self._media.get("playing"):
+            hot_track = self._hover_ctrl == "track" or getattr(self, "_scrub_drag", False)
+            knob_r = 5.2 if hot_track else 3.2
+            
+            if self._media.get("playing") or hot_track:
                 k = 0.5 + 0.5 * math.sin(self._pulse * 1.7)
-                p.setBrush(alpha(self._accent, int(36 + 34 * k)))
-                p.drawEllipse(QPointF(knob_x, track_y + th / 2), 5.6, 5.6)
+                glow_r = 8.5 if hot_track else (5.8 + 2.0 * k)
+                p.setBrush(alpha(self._accent, int(45 + 40 * k)))
+                p.drawEllipse(QPointF(knob_x, track_y + th / 2), glow_r, glow_r)
             p.setBrush(QColor(255, 255, 255))
-            p.drawEllipse(QPointF(knob_x, track_y + th / 2), 2.6, 2.6)
+            p.drawEllipse(QPointF(knob_x, track_y + th / 2), knob_r, knob_r)
+
+        # Hit test cho thanh tua nhạc
+        self._hits["track"] = QRectF(x - 4, track_y - 8, w + 8, 19.0)
 
         p.setFont(f(9.5, QFont.Weight.Medium, 0.2))
         p.setPen(C.mute)
-        p.drawText(QRectF(x, top + 96, 60, 13), LC, _mmss(pos))
-        p.drawText(QRectF(x + w - 60, top + 96, 60, 13), RC, _mmss(dur))
+        p.drawText(QRectF(x, top + 97, 60, 13), LC, _mmss(pos))
+        p.drawText(QRectF(x + w - 60, top + 97, 60, 13), RC, _mmss(dur))
 
         cx = x + w / 2.0
         cy = top + 134.0
         self._hits.update({
             "prev": QRectF(cx - 78, cy - 17, 34, 34),
-            "play": QRectF(cx - 22, cy - 22, 44, 44),
+            "play": QRectF(cx - 23, cy - 23, 46, 46),
             "next": QRectF(cx + 44, cy - 17, 34, 34),
         })
 
@@ -1336,23 +1844,25 @@ class Island(QWidget):
         hot_play = self._hover_ctrl == "play"
         p.setPen(Qt.PenStyle.NoPen)
         if hot_play:
-            p.setBrush(rgba(255, 255, 255, 34))
-            p.drawEllipse(QPointF(cx, cy), 25, 25)
-        # nút trắng đặc + glyph đen, đúng kiểu Apple Music
-        p.setBrush(QColor(255, 255, 255, 236 if hot_play else 222))
-        p.drawEllipse(QPointF(cx, cy), 21, 21)
+            p.setBrush(rgba(255, 255, 255, 40))
+            p.drawEllipse(QPointF(cx, cy), 26, 26)
+        
+        # Nút trắng đặc + glyph đen phong cách Apple Music với hiệu ứng nhún
+        play_radius = 22.0 if hot_play else 21.0
+        p.setBrush(QColor(255, 255, 255, 245 if hot_play else 228))
+        p.drawEllipse(QPointF(cx, cy), play_radius, play_radius)
 
         if playing:
             icons.pause(p, QRectF(cx - 5.0, cy - 7.0, 10.0, 14.0), QColor(9, 9, 12))
         else:
             icons.play(p, QRectF(cx - 4.0, cy - 7.6, 12.0, 15.0), QColor(9, 9, 12))
 
-        # nhịp "thở" lan ra từ nút play khi đang phát
+        # Quầng sáng lan tỏa xung quanh nút play khi nhạc đang phát
         if playing:
             ph = (self._pulse * 0.42) % 1.0
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(rgba(255, 255, 255, int(66 * (1.0 - ph))), 1.2))
-            p.drawEllipse(QPointF(cx, cy), 21.0 + ph * 11.0, 21.0 + ph * 11.0)
+            p.setPen(QPen(alpha(self._accent, int(70 * (1.0 - ph))), 1.3))
+            p.drawEllipse(QPointF(cx, cy), 21.0 + ph * 12.0, 21.0 + ph * 12.0)
 
         for name, ix, icon_fn in (
             ("prev", cx - 78 + 17, icons.prev),
@@ -1361,40 +1871,50 @@ class Island(QWidget):
             hot = self._hover_ctrl == name
             if hot:
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(alpha(QColor(255, 255, 255), 22))
-                p.drawEllipse(QPointF(ix, cy), 15, 15)
+                p.setBrush(alpha(QColor(255, 255, 255), 26))
+                p.drawEllipse(QPointF(ix, cy), 16, 16)
             icon_fn(
                 p,
                 QRectF(ix - 8, cy - 7.5, 16, 15),
-                alpha(QColor(255, 255, 255), 250 if hot else 160),
+                alpha(QColor(255, 255, 255), 255 if hot else 170),
             )
 
     def _paint_clock(self, p: QPainter, r: QRectF):
         top = r.top()
         self._eyes.paint(
             p,
-            QRectF(r.left() + 26, top + 24, 40.0, 20.0),
+            QRectF(r.left() + 26, top + 22, 38.0, 19.0),
             self._eye_color(),
-            force_happy=1.0,
+            force_happy=0.8,
         )
-        p.setFont(f(50, QFont.Weight.Light, -1.2))
+        p.setFont(f(52, QFont.Weight.Light, -1.0))
         p.setPen(C.text)
-        p.drawText(QRectF(r.left() + 24, top + 52, 300, 62), LC, time.strftime("%H:%M"))
-        p.setFont(f(11.5, QFont.Weight.Medium))
+        p.drawText(QRectF(r.left() + 24, top + 46, 300, 62), LC, time.strftime("%H:%M"))
+        
+        p.setFont(f(12.0, QFont.Weight.Medium, 0.2))
         p.setPen(C.dim)
-        p.drawText(QRectF(r.left() + 26, top + 114, 300, 16), LC, _vn_date())
+        p.drawText(QRectF(r.left() + 26, top + 112, 300, 18), LC, _vn_date())
 
-        chip = QRectF(r.left() + 24, top + 138, 196, 22)
+        hour = time.localtime().tm_hour
+        if 5 <= hour < 12:
+            greeting = "Chào buổi sáng ☀️"
+        elif 12 <= hour < 18:
+            greeting = "Chào buổi chiều 🌤️"
+        elif 18 <= hour < 23:
+            greeting = "Chào buổi tối 🌙"
+        else:
+            greeting = "Đêm muộn rồi, nghỉ ngơi nhé ✨"
+
+        chip = QRectF(r.left() + 24, top + 140, 220, 24)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C.chip)
-        p.drawRoundedRect(chip, 11, 11)
-        icons.note(p, QRectF(chip.left() + 9, chip.center().y() - 5.5, 11, 11), C.faint)
-        p.setFont(f(9.5, QFont.Weight.Medium, 0.1))
-        p.setPen(C.mute)
+        p.drawRoundedRect(chip, 12, 12)
+        p.setFont(f(10.0, QFont.Weight.Medium, 0.2))
+        p.setPen(alpha(self._accent, 230))
         p.drawText(
-            QRectF(chip.left() + 26, chip.top(), chip.width() - 34, chip.height()),
+            QRectF(chip.left() + 12, chip.top(), chip.width() - 24, chip.height()),
             LC,
-            "Chưa có nhạc đang phát",
+            greeting,
         )
 
     def _paint_stats(self, p: QPainter, r: QRectF, x: float, w: float):
@@ -1402,90 +1922,122 @@ class Island(QWidget):
         cpu = float(s.get("cpu", 0.0))
         ram = float(s.get("ram", 0.0))
         down = float(s.get("down", 0.0))
+        up = float(s.get("up", 0.0))
         batt = s.get("batt")
+        charging = bool(s.get("charging", False))
+
+        def _fmt_compact(bps: float) -> str:
+            if bps < 1024:
+                return f"{bps:.0f}B"
+            if bps < 1024 * 1024:
+                return f"{bps / 1024:.0f}K"
+            if bps < 1024 * 1024 * 1024:
+                return f"{bps / (1024 * 1024):.1f}M"
+            return f"{bps / (1024 * 1024 * 1024):.1f}G"
+
+        if up > 120_000:
+            net_str = f"↓{_fmt_compact(down)} ↑{_fmt_compact(up)}"
+        else:
+            net_str = fmt_rate(down)
 
         rows = [
-            ("CPU", f"{cpu:.0f}%", cpu / 100.0, self._level_color(cpu)),
-            ("RAM", f"{ram:.0f}%", ram / 100.0, self._level_color(ram)),
-            ("NET", fmt_rate(down), clamp(down / (12 * 1024 * 1024), 0.03, 1.0), self._accent),
+            ("CPU", f"{cpu:.0f}%", cpu / 100.0, self._cpu_color(cpu)),
+            ("RAM", f"{ram:.0f}%", ram / 100.0, self._ram_color(ram)),
+            ("NET", net_str, clamp(down / (15 * 1024 * 1024), 0.04, 1.0), C.cyan),
         ]
         if batt is not None:
+            batt_col = C.green if batt > 30 else (C.amber if batt > 15 else C.red)
+            batt_label = f"⚡ {batt:.0f}%" if charging else f"{batt:.0f}%"
             rows.append(
                 (
                     "PIN",
-                    f"{batt:.0f}%",
+                    batt_label,
                     batt / 100.0,
-                    alpha(C.green if batt > 30 else C.red, 215),
+                    batt_col,
                 )
             )
 
-        pitch = 33.0
-        content_h = (len(rows) - 1) * pitch + 24.0
-        top = r.top() + (r.height() - content_h) / 2.0 - 2.0
+        pitch = 29.0
+        top = r.top() + 44.0
 
         for i, (label, value, frac, color) in enumerate(rows):
             y = top + i * pitch
             p.setFont(f(8.5, QFont.Weight.DemiBold, 0.85))
             p.setPen(C.mute)
-            p.drawText(QRectF(x, y, w * 0.5, 14), LC, label)
+            p.drawText(QRectF(x, y, 30, 14), LC, label)
 
-            p.setFont(f(11.0, QFont.Weight.DemiBold, 0.1))
+            p.setFont(f(10.0, QFont.Weight.DemiBold, 0.1))
             p.setPen(C.dim)
-            p.drawText(QRectF(x + w * 0.5, y, w * 0.5, 14), RC, value)
+            p.drawText(QRectF(x + 30, y, w - 30, 14), RC, value)
 
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(C.track)
-            p.drawRoundedRect(QRectF(x, y + 19, w, 2.5), 1.25, 1.25)
-            p.setBrush(color)
-            p.drawRoundedRect(
-                QRectF(x, y + 19, max(3.0, w * clamp(frac, 0.0, 1.0)), 2.5), 1.25, 1.25
-            )
+            p.drawRoundedRect(QRectF(x, y + 19, w, 3.0), 1.5, 1.5)
+            
+            fill_w = max(3.0, w * clamp(frac, 0.0, 1.0))
+            bg_grad = QLinearGradient(x, 0, x + fill_w, 0)
+            bg_grad.setColorAt(0.0, mix(color, QColor(255, 255, 255), 0.35))
+            bg_grad.setColorAt(1.0, color)
+            p.setBrush(bg_grad)
+            p.drawRoundedRect(QRectF(x, y + 19, fill_w, 3.0), 1.5, 1.5)
 
         # --- âm lượng hệ thống ---
-        vy = r.top() + 156.0
+        vy = r.top() + 170.0
         muted = self._vol_muted
         icons.speaker(
             p,
-            QRectF(x, vy + 2, 11, 11),
+            QRectF(x, vy + 2, 12, 12),
             C.red if muted else C.dim,
             muted,
         )
-        self._hits["mute"] = QRectF(x - 3, vy - 2, 17, 16)
+        self._hits["mute"] = QRectF(x - 3, vy - 2, 18, 18)
 
-        tw = w - 16 - 30
-        tx = x + 16
+        tw = w - 18 - 32
+        tx = x + 18
         ty = vy + 7.0
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(C.track)
         p.drawRoundedRect(QRectF(tx, ty, tw, 3.0), 1.5, 1.5)
         lvl = 0.0 if muted else clamp(self._vol_level, 0.0, 1.0)
         if lvl > 0.004:
-            p.setBrush(alpha(C.accent, 215))
+            vol_grad = QLinearGradient(tx, 0, tx + tw * lvl, 0)
+            vol_grad.setColorAt(0.0, mix(C.accent, QColor(255, 255, 255), 0.3))
+            vol_grad.setColorAt(1.0, C.accent)
+            p.setBrush(vol_grad)
             p.drawRoundedRect(QRectF(tx, ty, max(3.0, tw * lvl), 3.0), 1.5, 1.5)
         kx = tx + tw * lvl
-        p.setBrush(alpha(QColor(255, 255, 255), 55))
-        p.drawEllipse(QPointF(kx, ty + 1.5), 4.3, 4.3)
+        p.setBrush(alpha(QColor(255, 255, 255), 65))
+        p.drawEllipse(QPointF(kx, ty + 1.5), 4.8, 4.8)
         p.setBrush(QColor(255, 255, 255))
-        p.drawEllipse(QPointF(kx, ty + 1.5), 2.4, 2.4)
+        p.drawEllipse(QPointF(kx, ty + 1.5), 2.6, 2.6)
 
-        self._vol_rect = QRectF(tx, ty - 6.0, tw, 15.0)
+        self._vol_rect = QRectF(tx - 2, ty - 8.0, tw + 4, 18.0)
         self._hits["vol"] = self._vol_rect
 
         p.setFont(f(8.5, QFont.Weight.DemiBold, 0.2))
         p.setPen(C.red if muted else C.dim)
         label = "Tắt" if muted else f"{round(self._vol_level * 100)}%"
-        p.drawText(QRectF(x + w - 28, vy, 28, 16), RC, label)
+        p.drawText(QRectF(x + w - 30, vy, 30, 16), RC, label)
 
     @staticmethod
-    def _level_color(pct: float) -> QColor:
+    def _cpu_color(pct: float) -> QColor:
         if pct >= 85:
             return C.red
         if pct >= 65:
             return C.amber
         return C.accent
 
+    @staticmethod
+    def _ram_color(pct: float) -> QColor:
+        if pct >= 85:
+            return C.red
+        if pct >= 70:
+            return C.amber
+        return C.green
+
     def _paint_shelf(self, p: QPainter, r: QRectF):
-        self._hits = {}
+        if self._state == EXPANDED:
+            self._paint_tab_bar(p, r)
         pad = 22
         # --- header ---
         title_font = f(13, QFont.Weight.DemiBold)
@@ -1590,59 +2142,58 @@ class Island(QWidget):
 
     def _paint_notif(self, p: QPainter, r: QRectF):
         n = self._notif or {}
-        app = n.get("app", "Ứng dụng")
+        app = n.get("app", "Thông báo")
         col = _app_color(app)
-        box = QRectF(r.left() + 22, r.center().y() - 22, 44, 44)
+        box = QRectF(r.left() + 24, r.center().y() - 22, 44, 44)
 
-        halo = QRadialGradient(box.center(), 52)
-        halo.setColorAt(0.0, alpha(col, 90))
+        halo = QRadialGradient(box.center(), 56)
+        halo.setColorAt(0.0, alpha(col, 105))
         halo.setColorAt(1.0, alpha(col, 0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(halo))
-        p.drawEllipse(box.center(), 52, 52)
+        p.drawEllipse(box.center(), 56, 56)
 
         path = QPainterPath()
         path.addRoundedRect(box, 13, 13)
         g = QLinearGradient(box.topLeft(), box.bottomRight())
-        g.setColorAt(0.0, mix(col, QColor(255, 255, 255), 0.16))
-        g.setColorAt(1.0, mix(col, QColor(0, 0, 0), 0.30))
+        g.setColorAt(0.0, mix(col, QColor(255, 255, 255), 0.22))
+        g.setColorAt(1.0, mix(col, QColor(0, 0, 0), 0.35))
         p.fillPath(path, QBrush(g))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(alpha(QColor(255, 255, 255), 44), 1.0))
+        p.setPen(QPen(alpha(QColor(255, 255, 255), 55), 1.0))
         p.drawPath(path)
 
         p.setFont(f(19, QFont.Weight.DemiBold))
-        p.setPen(alpha(QColor(255, 255, 255), 245))
+        p.setPen(alpha(QColor(255, 255, 255), 250))
         p.drawText(box, CC, app[:1].upper())
 
         x = box.right() + 16
         qn = len(self._notif_q)
-        w = r.right() - 24 - x - 46 - (32 if qn else 0)
+        w = r.right() - 24 - x - 46 - (34 if qn else 0)
 
         app_font = f(9.0, QFont.Weight.DemiBold, 1.0)
         p.setFont(app_font)
-        p.setPen(alpha(QColor(255, 255, 255), 148))
+        p.setPen(alpha(col, 220) if col.valueF() > 0.6 else alpha(QColor(255, 255, 255), 160))
         p.drawText(QRectF(x, r.top() + 24, w, 13), LC, _elide(app.upper(), app_font, w))
 
         p.setFont(f(8.5, QFont.Weight.Medium, 0.2))
         p.setPen(C.faint)
         p.drawText(QRectF(r.right() - 24 - 44, r.top() + 24, 44, 13), RC, "bây giờ")
 
-        # còn thông báo chờ: chip +N báo "còn nữa", bấm thẻ để xem tiếp
         if qn:
-            pill = QRectF(r.right() - 24 - 44 - 29, r.top() + 22, 24, 16)
+            pill = QRectF(r.right() - 24 - 44 - 32, r.top() + 22, 26, 17)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(alpha(self._accent, 48))
-            p.drawRoundedRect(pill, 8, 8)
+            p.setBrush(alpha(self._accent, 55))
+            p.drawRoundedRect(pill, 8.5, 8.5)
             p.setFont(f(9.0, QFont.Weight.DemiBold))
-            p.setPen(mix(self._accent, QColor(255, 255, 255), 0.42))
+            p.setPen(mix(self._accent, QColor(255, 255, 255), 0.5))
             p.drawText(pill, Qt.AlignmentFlag.AlignCenter, f"+{qn}")
 
         title_font = f(13.5, QFont.Weight.DemiBold, -0.1)
         p.setFont(title_font)
         p.setPen(C.text)
         p.drawText(
-            QRectF(x, r.top() + 38, w, 19),
+            QRectF(x, r.top() + 39, w, 19),
             LC,
             _elide(n.get("title", ""), title_font, w),
         )
@@ -1651,7 +2202,7 @@ class Island(QWidget):
         p.setFont(body_font)
         p.setPen(C.dim)
         p.drawText(
-            QRectF(x, r.top() + 59, w, 17),
+            QRectF(x, r.top() + 60, w, 17),
             LC,
             _elide(n.get("body", ""), body_font, w),
         )
@@ -1687,7 +2238,24 @@ class Island(QWidget):
         if not self._hover:
             self.refresh()
 
+    def _set_seek_at(self, x: float):
+        rect = self._hits.get("track")
+        if not rect or rect.width() <= 1:
+            return
+        dur = self._media.get("duration") or 0.0
+        if dur <= 0:
+            return
+        frac = clamp((x - rect.left()) / rect.width(), 0.0, 1.0)
+        target_pos = frac * dur
+        self._pos_base = target_pos
+        self._pos_at = time.monotonic()
+        self.action_requested.emit(f"seek:{target_pos:.1f}")
+        self.update()
+
     def mouseMoveEvent(self, event):
+        if getattr(self, "_scrub_drag", False):
+            self._set_seek_at(event.position().x())
+            return
         if self._vol_drag:
             self._set_vol_at(event.position().x())
             return
@@ -1729,6 +2297,11 @@ class Island(QWidget):
                 self._set_vol_at(event.position().x())
                 event.accept()
                 return
+            if hit == "track":
+                self._scrub_drag = True
+                self._set_seek_at(event.position().x())
+                event.accept()
+                return
             if hit and hit.startswith("shelf_open:"):
                 idx = int(hit.split(":")[1])
                 if 0 <= idx < len(self._shelf):
@@ -1758,6 +2331,9 @@ class Island(QWidget):
             if not self._show_next_notification():
                 self.refresh()
             return
+        if getattr(self, "_scrub_drag", False):
+            self._scrub_drag = False
+            return
         if self._vol_drag:
             self._vol_drag = False
             return
@@ -1776,6 +2352,86 @@ class Island(QWidget):
             return
         hit = self._press_hit or self._hit_at(event.position())
         dbg("release hit", hit, "state", self._state, "dragged", self._dragged)
+        if hit is None and not self._dragged:
+            self._eyes.trigger_wink()
+            return
+
+        # --- Điều hướng tab Nusa ---
+        if hit and hit.startswith("tab:"):
+            self._tab = hit.split(":")[1]
+            if self._tab == "shelf":
+                self._shelf_open = True
+            self.update()
+            return
+
+        # --- Tab Lời: click để tua bài hát đến câu tương ứng ---
+        if hit and hit.startswith("lyric:"):
+            target_time = float(hit.split(":")[1])
+            self._pos_base = target_time
+            self._pos_at = time.monotonic()
+            self.action_requested.emit(f"seek:{target_time:.1f}")
+            self.update()
+            return
+
+        if hit == "lyrics_refresh":
+            if self._media.get("has"):
+                self._lyrics_mgr.request(
+                    self._media.get("title", ""),
+                    self._media.get("artist", ""),
+                    self._media.get("duration", 0.0),
+                )
+            return
+
+        # --- Tab Focus Pomodoro ---
+        if hit == "timer_toggle":
+            self._focus_timer.toggle()
+            self.update()
+            return
+        if hit == "timer_reset":
+            self._focus_timer.reset()
+            self.update()
+            return
+        if hit == "timer_set_focus":
+            self._focus_timer.set_mode("focus")
+            self.update()
+            return
+        if hit == "timer_set_break":
+            self._focus_timer.set_mode("break")
+            self.update()
+            return
+
+        # --- Tab Nước ---
+        if hit == "water_add_250":
+            self._water.add(250)
+            self.update()
+            return
+        if hit == "water_add_500":
+            self._water.add(500)
+            self.update()
+            return
+        if hit == "water_reset":
+            self._water.reset()
+            self.update()
+            return
+
+        # --- Tab Việc cần làm (To-Do) ---
+        if hit == "todo_add":
+            text, ok = QInputDialog.getText(self, "Thêm việc mới", "Nội dung việc cần làm:")
+            if ok and text.strip():
+                self._todo.add(text.strip())
+                self.update()
+            return
+        if hit and hit.startswith("todo_toggle:"):
+            idx = int(hit.split(":")[1])
+            self._todo.toggle(idx)
+            self.update()
+            return
+        if hit and hit.startswith("todo_del:"):
+            idx = int(hit.split(":")[1])
+            self._todo.delete(idx)
+            self.update()
+            return
+
         if hit == "mute":
             self._toggle_mute()
             return
@@ -1810,17 +2466,24 @@ class Island(QWidget):
         return None
 
     def wheelEvent(self, event):
-        """Con lăn trên kệ file: cuộn danh sách khi có nhiều hơn 5 file."""
-        if self._state != SHELF or len(self._shelf) <= SHELF_ROWS:
-            event.ignore()
-            return
+        """Con lăn: cuộn kệ file nếu kệ mở; hoặc chỉnh âm lượng hệ thống mọi lúc!"""
+        if self._state == SHELF and len(self._shelf) > SHELF_ROWS:
+            dy = event.angleDelta().y()
+            if dy:
+                steps = int(dy / 120) or (1 if dy > 0 else -1)
+                self._scroll_shelf(-steps)
+                event.accept()
+                return
         dy = event.angleDelta().y()
-        if not dy:
-            event.ignore()
-            return
-        steps = int(dy / 120) or (1 if dy > 0 else -1)
-        self._scroll_shelf(-steps)
-        event.accept()
+        if dy:
+            delta = 0.03 if dy > 0 else -0.03
+            new_vol = clamp(self._vol_level + delta, 0.0, 1.0)
+            self._vol_level = new_vol
+            if self._vol_muted and new_vol > 0.0:
+                self._vol_muted = False
+            self._volume.set_level(new_vol)
+            self.update()
+            event.accept()
 
     def _snap(self):
         screen = self.screen().availableGeometry()

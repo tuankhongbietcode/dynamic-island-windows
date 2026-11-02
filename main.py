@@ -159,14 +159,23 @@ def main() -> int:
     island.quit_requested.connect(quit_app)
 
     tray = QSystemTrayIcon(tray_icon(), app)
-    tray.setToolTip("Dynamic Island")
+    tray.setToolTip("Dynamic Island - Bấm để Mở rộng/Thu gọn")
+
+    def on_tray_activated(reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            toggle_expand()
+
+    tray.activated.connect(on_tray_activated)
 
     menu = QMenu()
     menu.setStyleSheet(
-        "QMenu{background:#1b1b22;color:#fff;border:1px solid rgba(255,255,255,0.10);"
-        "border-radius:10px;padding:6px;font-size:12px;}"
-        "QMenu::item{padding:6px 20px;border-radius:6px;}"
-        "QMenu::item:selected{background:rgba(255,255,255,0.10);}"
+        "QMenu{background:#141418;color:#f8f9fa;border:1px solid rgba(255,255,255,0.12);"
+        "border-radius:12px;padding:6px;font-size:12px;}"
+        "QMenu::item{padding:7px 22px;border-radius:7px;}"
+        "QMenu::item:selected{background:rgba(255,255,255,0.12);color:#7aadff;}"
         "QMenu::separator{height:1px;background:rgba(255,255,255,0.08);margin:5px 8px;}"
     )
 

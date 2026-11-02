@@ -150,6 +150,11 @@ class MediaWorker(QThread):
                 ok = await s.try_skip_next_async()
             elif action == "prev":
                 ok = await s.try_skip_previous_async()
+            elif action.startswith("seek:"):
+                target_sec = float(action.split(":")[1])
+                # Ticks = 100ns (1s = 10,000,000 ticks)
+                ticks = int(target_sec * 10_000_000)
+                ok = await s.try_change_playback_position_async(ticks)
             dbg("cmd", action, "->", ok)
         except Exception as exc:  # pragma: no cover
             dbg("cmd failed", action, repr(exc))
