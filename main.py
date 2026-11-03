@@ -195,6 +195,11 @@ def main() -> int:
 
     act_shelf.triggered.connect(toggle_shelf)
 
+    act_dock = QAction("Dán sát đỉnh màn hình (Notch mode)", menu)
+    act_dock.setCheckable(True)
+    act_dock.setChecked(cfg.get("dock_to_top", True))
+    act_dock.toggled.connect(island.set_dock_to_top)
+
     act_top = QAction("Luôn trên cùng", menu)
     act_top.setCheckable(True)
     act_top.setChecked(cfg.get("always_on_top", True))
@@ -235,6 +240,7 @@ def main() -> int:
 
     menu.addAction(act_expand)
     menu.addAction(act_shelf)
+    menu.addAction(act_dock)
     menu.addAction(act_top)
     menu.addAction(act_static)
     menu.addAction(act_autostatic)

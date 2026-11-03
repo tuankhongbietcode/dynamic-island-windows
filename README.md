@@ -53,8 +53,14 @@ Khi rê chuột hoặc ghim mở rộng, Dynamic Island xuất hiện thanh 6 Ta
 - Nhún nhảy (`bounce`) bồng bềnh theo từng nhịp sóng nhạc phát ra.
 - Tự động ngủ lim dim với các chữ `z` / `Z` bay lơ lửng khi bạn không dùng máy.
 
-### 4. 🎨 Thiết Kế OLED & Glassmorphism Đẳng Cấp
+### 4. 🌐 Tối Ưu Cho Trình Duyệt: Profile Siêu Gọn 32px & Notch Mode
+- **Chiều cao siêu mỏng 32px (Bán kính 16px)**: Nằm lọt hoàn toàn trong dải thanh tab (thường cao 40–42px) của Chrome, Edge, Firefox hay Brave. Không che khuất thanh địa chỉ Omnibox, trang web hay các tab đang mở.
+- **Dán sát đỉnh màn hình (Notch Mode)**: Mặc định đảo hít sát mép trên màn hình (`top = 0`), tạo cảm giác như một cụm notch camera vật lý liền mạch trên Windows, loại bỏ khoảng hở kỳ cục phía trên thanh tab. Bạn có thể dễ dàng chuyển đổi giữa **Notch mode** và **Island mode (lơ lửng)** trong menu chuột phải hoặc khay hệ thống Tray.
+- **Smart Hover Intent Delay**: Khi bạn đang lướt web và di chuột nhanh qua đỉnh để đổi tab hoặc bấm bookmark, Dynamic Island nhận diện hành vi lướt và **không bung mở rộng ngoài ý muốn**! Chỉ khi bạn cố tình dừng chuột lại trên đảo (>260ms) hoặc click chuột trái trực tiếp, đảo mới mở rộng panel tiện ích.
+
+### 5. 🎨 Thiết Kế OLED & Glassmorphism Đẳng Cấp
 - Nền **đen tuyền OLED** (`#000000`) phối hợp gradient vi mô chống bệt màu.
+- **Khử 100% viền xám / hộp xám**: Áp dụng thuật toán **Feather Edge Ramp** triệt tiêu toán học đuôi mờ Gaussian ở viền ngoài, kết hợp thiết lập Windows 11 DWM (`DWMNCRP_DISABLED`, `DWMWCP_DONOTROUND`, `DWMWA_COLOR_NONE`).
 - **Bóng đổ đa tầng chuẩn Apple**: contact shadow sắc sảo kết hợp ambient elevation shadow mềm mại, khử hoàn toàn góc gãy hay khung chữ nhật.
 - **Ambient Backlight**: Quầng sáng phản chiếu màu sắc của ảnh bìa album hắt nhẹ xuống desktop.
 - **Viền gương (Specular Rim)**: Vát viền 2 lớp sang trọng như một khối kính đen lơ lửng.
@@ -74,7 +80,8 @@ Dynamic Island được lập trình với cơ chế điều tiết nhịp FPS t
 
 | Thao tác | Hành vi trên Dynamic Island |
 |---|---|
-| **Rê chuột vào đảo** | Bung mở rộng panel 6 Tab widget Nusa |
+| **Rê chuột giữ >260ms hoặc Click trái** | Bung mở rộng panel 6 Tab widget Nusa ngay lập tức |
+| **Lướt nhanh con trỏ qua đảo khi duyệt web** | Giữ nguyên thu gọn (Smart Hover Intent chống mở ngoài ý muốn) |
 | **Click vào Tab (Nhạc, Lời, Focus, Nước, Việc, Kệ)** | Chuyển đổi qua lại giữa các tiện ích tức thì |
 | **Lăn con lăn chuột (bất kỳ đâu trên đảo)** | Tăng / giảm âm lượng hệ thống siêu nhanh |
 | **Click câu hát trong Tab Lời** | Tua trực tiếp bài hát đến thời điểm câu hát đó |
@@ -82,9 +89,9 @@ Dynamic Island được lập trình với cơ chế điều tiết nhịp FPS t
 | **Bấm phím Caps Lock trên bàn phím** | Hiện HUD trạng thái `⇪ Caps Lock: BẬT / TẮT` |
 | **Kéo file từ Desktop / Explorer vào đảo** | Tự mở Kệ file và lưu trữ tạm thời |
 | **Kéo file từ Kệ sang ứng dụng khác** | Gửi/đính kèm file sang Zalo, Discord, Telegram, Gmail |
-| **Click chuột trái vào thân đảo** | Nháy mắt tinh nghịch / Ghim cố định mở rộng |
+| **Click chuột trái vào thân đảo** | Mở rộng tức thì / Ghim cố định mở rộng |
 | **Kéo giữ chuột trái** | Di chuyển vị trí đảo (tự hít bám vào mép trên màn hình) |
-| **Click chuột phải lên đảo** | Mở menu cài đặt nhanh (Ghim, Về giữa, Thông báo thử, Thoát) |
+| **Click chuột phải lên đảo** | Mở menu: Ghim, Dán sát đỉnh (Notch mode), Về giữa, Kệ, Thoát |
 
 ---
 

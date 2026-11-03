@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QAction,
     QBrush,
     QColor,
     QCursor,
@@ -67,10 +68,10 @@ SHELF = "shelf"
 
 # (rộng, cao, bán kính góc)
 SIZES = {
-    IDLE: (196, 42, 21.0),
-    COMPACT: (250, 42, 21.0),
+    IDLE: (182, 32, 16.0),
+    COMPACT: (240, 32, 16.0),
     EXPANDED: (520, 216, 44.0),
-    NOTIF: (440, 100, 34.0),
+    NOTIF: (420, 84, 26.0),
     SHELF: (520, 216, 44.0),
 }
 
@@ -254,8 +255,12 @@ class Island(QWidget):
         self._slide = 0.0
 
         screen = self.screen().availableGeometry()
+        self._dock_top = bool(config.get("dock_to_top", True))
         self._cx = float(config.get("cx") or screen.center().x())
-        self._top = float(config.get("top", screen.top() + 8))
+        if self._dock_top:
+            self._top = float(screen.top())
+        else:
+            self._top = float(config.get("top", screen.top() + 6))
         self._pinned = bool(config.get("pinned", False))
         self._always_top = bool(config.get("always_on_top", True))
 
@@ -374,6 +379,11 @@ class Island(QWidget):
         self._collapse.setInterval(280)
         self._collapse.timeout.connect(self._maybe_collapse)
 
+        # Bộ lọc trễ Smart Hover Intent Delay: tránh bung đảo khi lướt chuột đổi tab trình duyệt
+        self._hover_expand_timer = QTimer(self)
+        self._hover_expand_timer.setSingleShot(True)
+        self._hover_expand_timer.timeout.connect(self._on_hover_expand)
+
         self._notif_timer = QTimer(self)
         self._notif_timer.setInterval(250)
         self._notif_timer.timeout.connect(self._check_notif)
@@ -428,11 +438,30 @@ class Island(QWidget):
         return {
             "cx": self._cx,
             "top": self._top,
+            "dock_to_top": self._dock_top,
             "pinned": self._pinned,
             "always_on_top": self._always_top,
             "static_mode": self._static,
             "auto_static": self._auto_static,
         }
+
+    def set_dock_to_top(self, on: bool):
+        """Bật/tắt dán sát đỉnh màn hình (Notch mode) hoặc lơ lửng (Island mode)."""
+        self._dock_top = bool(on)
+        screen = self.screen().availableGeometry()
+        if self._dock_top:
+            self._top = float(screen.top())
+        else:
+            self._top = float(screen.top() + 6)
+        self._reposition()
+        self.update()
+
+    def reset_position(self):
+        screen = self.screen().availableGeometry()
+        self._cx = float(screen.center().x())
+        self._top = float(screen.top()) if self._dock_top else float(screen.top() + 6)
+        self._reposition()
+        self.update()
 
     def _on_timer_finished(self, mode: str):
         if mode == "focus":
@@ -463,12 +492,6 @@ class Island(QWidget):
             self._eyes.blink = 0.0
             self._marq = False
         self.update()
-
-    def reset_position(self):
-        screen = self.screen().availableGeometry()
-        self._cx = float(screen.center().x())
-        self._top = float(screen.top() + 8)
-        self._reposition()
 
     def set_always_on_top(self, on: bool):
         self._always_top = on
@@ -711,10 +734,17 @@ class Island(QWidget):
         except Exception:
             return -1, -1
 
+    def _pill_global_rect(self) -> QRectF:
+        w = self._size.width()
+        h = self._size.height()
+        return QRectF(self._cx - w / 2, self._top, w, h)
+
     def _check_foreground(self):
         other = self._is_other_app_foreground()
         cx, cy = self._cursor_global()
-        geo = self.geometry().contains(cx, cy)
+        # Chỉ tính hover khi chuột thật sự chạm vào viên đảo (+4px đệm),
+        # KHÔNG tính vùng bóng đổ 36px để tránh bung nhầm khi đổi tab trình duyệt!
+        geo = self._pill_global_rect().adjusted(-4, -4, 4, 4).contains(cx, cy)
         changed = other != self._other_fg or geo != self._geo_hover
         if other and not self._other_fg:
             # vừa chuyển sang app khác: duỗi thẳng mắt, ngưng chữ chạy
@@ -722,12 +752,23 @@ class Island(QWidget):
             self._marq = False
         self._other_fg = other
         self._geo_hover = geo
-        hover = self._evt_hover or geo
-        if hover != self._hover:
-            self._hover = hover
+
+        # Nếu chuột rời khỏi đảo và không ghim: thu gọn lại
+        if not geo and not self._evt_hover and self._hover and not self._pinned:
+            self._hover = False
+            self._hover_expand_timer.stop()
+            self.refresh()
             changed = True
+        elif geo and not self._hover and not self._hover_expand_timer.isActive():
+            if self._state in (IDLE, COMPACT):
+                delay = 260 if self._other_fg else 90
+                self._hover_expand_timer.start(delay)
+            else:
+                self._hover = True
+                self.refresh()
+                changed = True
+
         if changed:
-            # chỉ vẽ lại khi trạng thái thật sự đổi, không vẽ vô ích mỗi 400ms
             self.update()
 
     # ------------------------------------------------------------ âm lượng
@@ -1146,47 +1187,51 @@ class Island(QWidget):
     def _paint_idle(self, p: QPainter, r: QRectF):
         clock = time.strftime("%H:%M")
         date = _vn_short()
-        clock_font = f(13.5, QFont.Weight.DemiBold, 0.2)
-        date_font = f(8.5, QFont.Weight.Medium, 0.35)
+        clock_font = f(11.5, QFont.Weight.DemiBold, 0.2)
+        date_font = f(7.5, QFont.Weight.Medium, 0.3)
         fm_c = fm(clock_font)
         fm_d = fm(date_font)
         block_w = max(fm_c.horizontalAdvance("00:00"), fm_d.horizontalAdvance(date))
-        eye_w, gap = 20.0, 11.0
+        eye_w, gap = 18.0, 9.0
         total = eye_w + gap + block_w
-        x0 = r.center().x() - total / 2.0
+        x0 = r.center().x() - total / 2.0 - 5.0
+        cy = r.center().y()
 
         self._eyes.paint(
-            p, QRectF(x0, r.center().y() - 5.0, eye_w, 10.0), self._eye_color()
+            p, QRectF(x0, cy - 4.5, eye_w, 9.0), self._eye_color()
         )
 
         bx = x0 + eye_w + gap
-        y0 = r.center().y() - 15.0
+        y0 = cy - 11.5
         p.setFont(clock_font)
         p.setPen(C.text)
-        p.drawText(QRectF(bx, y0, block_w + 2, 19), LC, clock)
+        p.drawText(QRectF(bx, y0, block_w + 4, 13.5), LC, clock)
         p.setFont(date_font)
         p.setPen(C.mute)
-        p.drawText(QRectF(bx, y0 + 19, block_w + 2, 14), LC, date)
+        p.drawText(QRectF(bx, y0 + 13.0, block_w + 4, 10.5), LC, date)
 
-        # ống kính ở nửa phải, đúng vị trí camera trên notch MacBook
-        self._paint_camera(p, r.right() - 28.0, r.center().y())
+        # ống kính camera nhỏ gọn thanh lịch ở nửa phải
+        self._paint_camera(p, r.right() - 20.0, cy, scale=0.78)
 
     def _paint_compact(self, p: QPainter, r: QRectF):
-        art = QRectF(r.left() + 7, r.top() + 7, 28, 28)
-        self._paint_art_glow(p, art)
-        self._paint_art(p, art, 9.5, small=True)
-
         cy = r.center().y()
-        x = art.right() + 9
-        if self._media.get("playing"):
-            self._paint_eq(p, QRectF(x, cy - 7.0, 18, 14))
-        else:
-            icons.pause(p, QRectF(x + 2, cy - 5, 9, 10), C.mute)
-        x += 24
+        art = QRectF(r.left() + 5.0, cy - 11.0, 22.0, 22.0)
+        self._paint_art_glow(p, art)
+        self._paint_art(p, art, 6.5, small=True)
 
-        eye_w = 24.0
-        tf = f(11.5, QFont.Weight.DemiBold)
-        avail = r.right() - 13 - eye_w - 10 - x
+        x = art.right() + 7.5
+        if self._media.get("playing"):
+            self._paint_eq(p, QRectF(x, cy - 5.5, 16.0, 11.0))
+        else:
+            icons.pause(p, QRectF(x + 1.5, cy - 4.5, 8.0, 9.0), C.mute)
+        x += 21.0
+
+        eye_w = 20.0
+        eye_rect = QRectF(r.right() - 10.0 - eye_w, cy - 4.75, eye_w, 9.5)
+        self._eyes.paint(p, eye_rect, self._eye_color())
+
+        avail = r.right() - 10.0 - eye_w - 7.0 - x
+        tf = f(10.5, QFont.Weight.DemiBold, -0.1)
         p.setFont(tf)
         p.setPen(C.text)
         p.drawText(
@@ -1195,22 +1240,16 @@ class Island(QWidget):
             _elide(self._media.get("title", ""), tf, avail),
         )
 
-        self._eyes.paint(
-            p,
-            QRectF(r.right() - 13 - eye_w, cy - 5.5, eye_w, 11.0),
-            self._eye_color(),
-        )
-
     def _paint_eq(self, p: QPainter, r: QRectF):
         """Sóng nhạc 5 vạch phong cách Apple Music với gradient và đầu bo tròn."""
         p.setPen(Qt.PenStyle.NoPen)
-        n, bw = 5, 2.3
+        n, bw = 5, 2.0
         gap = (r.width() - n * bw) / (n - 1)
         for i in range(n):
             a = 0.5 + 0.5 * math.sin(self._eq * 1.00 + i * 1.37)
             b = 0.5 + 0.5 * math.sin(self._eq * 0.63 + i * 2.11 + 1.2)
             amp = 0.20 + 0.80 * (a * 0.62 + b * 0.38)
-            hgt = max(2.6, r.height() * amp)
+            hgt = max(2.2, r.height() * amp)
             x = r.left() + i * (bw + gap)
             y = r.center().y() - hgt / 2.0
             
@@ -2164,17 +2203,17 @@ class Island(QWidget):
         n = self._notif or {}
         app = n.get("app", "Thông báo")
         col = _app_color(app)
-        box = QRectF(r.left() + 24, r.center().y() - 22, 44, 44)
+        box = QRectF(r.left() + 20, r.center().y() - 19, 38, 38)
 
-        halo = QRadialGradient(box.center(), 56)
+        halo = QRadialGradient(box.center(), 48)
         halo.setColorAt(0.0, alpha(col, 105))
         halo.setColorAt(1.0, alpha(col, 0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(halo))
-        p.drawEllipse(box.center(), 56, 56)
+        p.drawEllipse(box.center(), 48, 48)
 
         path = QPainterPath()
-        path.addRoundedRect(box, 13, 13)
+        path.addRoundedRect(box, 11, 11)
         g = QLinearGradient(box.topLeft(), box.bottomRight())
         g.setColorAt(0.0, mix(col, QColor(255, 255, 255), 0.22))
         g.setColorAt(1.0, mix(col, QColor(0, 0, 0), 0.35))
@@ -2183,46 +2222,46 @@ class Island(QWidget):
         p.setPen(QPen(alpha(QColor(255, 255, 255), 55), 1.0))
         p.drawPath(path)
 
-        p.setFont(f(19, QFont.Weight.DemiBold))
+        p.setFont(f(17, QFont.Weight.DemiBold))
         p.setPen(alpha(QColor(255, 255, 255), 250))
         p.drawText(box, CC, app[:1].upper())
 
-        x = box.right() + 16
+        x = box.right() + 14
         qn = len(self._notif_q)
-        w = r.right() - 24 - x - 46 - (34 if qn else 0)
+        w = r.right() - 20 - x - 44 - (32 if qn else 0)
 
-        app_font = f(9.0, QFont.Weight.DemiBold, 1.0)
+        app_font = f(8.5, QFont.Weight.DemiBold, 0.8)
         p.setFont(app_font)
         p.setPen(alpha(col, 220) if col.valueF() > 0.6 else alpha(QColor(255, 255, 255), 160))
-        p.drawText(QRectF(x, r.top() + 24, w, 13), LC, _elide(app.upper(), app_font, w))
+        p.drawText(QRectF(x, r.top() + 16, w, 12), LC, _elide(app.upper(), app_font, w))
 
-        p.setFont(f(8.5, QFont.Weight.Medium, 0.2))
+        p.setFont(f(8.0, QFont.Weight.Medium, 0.2))
         p.setPen(C.faint)
-        p.drawText(QRectF(r.right() - 24 - 44, r.top() + 24, 44, 13), RC, "bây giờ")
+        p.drawText(QRectF(r.right() - 20 - 40, r.top() + 16, 40, 12), RC, "bây giờ")
 
         if qn:
-            pill = QRectF(r.right() - 24 - 44 - 32, r.top() + 22, 26, 17)
+            pill = QRectF(r.right() - 20 - 40 - 28, r.top() + 15, 24, 15)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(alpha(self._accent, 55))
-            p.drawRoundedRect(pill, 8.5, 8.5)
-            p.setFont(f(9.0, QFont.Weight.DemiBold))
+            p.drawRoundedRect(pill, 7.5, 7.5)
+            p.setFont(f(8.5, QFont.Weight.DemiBold))
             p.setPen(mix(self._accent, QColor(255, 255, 255), 0.5))
             p.drawText(pill, Qt.AlignmentFlag.AlignCenter, f"+{qn}")
 
-        title_font = f(13.5, QFont.Weight.DemiBold, -0.1)
+        title_font = f(12.5, QFont.Weight.DemiBold, -0.1)
         p.setFont(title_font)
         p.setPen(C.text)
         p.drawText(
-            QRectF(x, r.top() + 39, w, 19),
+            QRectF(x, r.top() + 31, w, 18),
             LC,
             _elide(n.get("title", ""), title_font, w),
         )
 
-        body_font = f(11.5, QFont.Weight.Normal)
+        body_font = f(10.5, QFont.Weight.Normal)
         p.setFont(body_font)
         p.setPen(C.dim)
         p.drawText(
-            QRectF(x, r.top() + 60, w, 17),
+            QRectF(x, r.top() + 50, w, 16),
             LC,
             _elide(n.get("body", ""), body_font, w),
         )
@@ -2237,16 +2276,33 @@ class Island(QWidget):
     def enterEvent(self, _event):
         self._set_tick_rate(16)   # vào chuột là chạy full nhịp ngay, không chờ tick
         self._evt_hover = True
-        self._hover = True
         self._suppressed = False
         self._collapse.stop()
         self._badge = False
         if self._state == NOTIF:
             # đang hiện thông báo mà chuột lướt vào: giữ thêm, đừng tắt ngang
             self._notif_until = max(self._notif_until, time.monotonic() + 3.0)
-        self.refresh()
+            self._hover = True
+            self.refresh()
+            return
+
+        if self._state in (EXPANDED, SHELF):
+            self._hover = True
+            return
+
+        # Smart Hover Intent Delay: khi lướt chuột qua để đổi tab trình duyệt hoặc click bookmark,
+        # không kích hoạt bung mở rộng trừ khi chuột dừng lại >260ms (hoặc 90ms ở desktop)
+        delay = 260 if self._other_fg else 90
+        self._hover_expand_timer.start(delay)
+        self.update()
+
+    def _on_hover_expand(self):
+        if self._evt_hover or self._geo_hover:
+            self._hover = True
+            self.refresh()
 
     def leaveEvent(self, _event):
+        self._hover_expand_timer.stop()
         self._evt_hover = False
         self._hover = self._geo_hover
         self._suppressed = False
@@ -2373,6 +2429,13 @@ class Island(QWidget):
         hit = self._press_hit or self._hit_at(event.position())
         dbg("release hit", hit, "state", self._state, "dragged", self._dragged)
         if hit is None and not self._dragged:
+            if self._state in (IDLE, COMPACT):
+                # Click trực tiếp vào viên đảo: mở rộng ngay lập tức!
+                self._hover_expand_timer.stop()
+                self._hover = True
+                self._pinned = True
+                self.refresh()
+                return
             self._eyes.trigger_wink()
             return
 
@@ -2507,8 +2570,10 @@ class Island(QWidget):
 
     def _snap(self):
         screen = self.screen().availableGeometry()
-        if abs(self._top - (screen.top() + 8)) < 48:
-            self._top = float(screen.top() + 8)
+        if self._dock_top or abs(self._top - screen.top()) < 36:
+            self._top = float(screen.top())
+        elif abs(self._top - (screen.top() + 6)) < 24:
+            self._top = float(screen.top() + 6)
         self._top = clamp(self._top, screen.top() - 4, screen.bottom() - self._size.height())
         half = self._size.width() / 2
         self._cx = clamp(self._cx, screen.left() + half, screen.right() - half)
@@ -2700,6 +2765,10 @@ class Island(QWidget):
             "QMenu::separator{height:1px;background:rgba(255,255,255,0.08);margin:5px 8px;}"
         )
         act_pin = menu.addAction("Bỏ ghim" if self._pinned else "Ghim mở rộng")
+        act_dock = QAction("Dán sát đỉnh (Notch mode)", menu)
+        act_dock.setCheckable(True)
+        act_dock.setChecked(self._dock_top)
+        menu.addAction(act_dock)
         act_pos = menu.addAction("Về giữa màn hình")
         act_shelf = menu.addAction("Đóng kệ file" if self._shelf_open else "Mở kệ file")
         if self._shelf:
@@ -2712,6 +2781,8 @@ class Island(QWidget):
         if chosen == act_pin:
             self._pinned = not self._pinned
             self.refresh()
+        elif chosen == act_dock:
+            self.set_dock_to_top(act_dock.isChecked())
         elif chosen == act_pos:
             self.reset_position()
         elif chosen == act_shelf:
